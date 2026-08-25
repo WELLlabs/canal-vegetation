@@ -7,6 +7,7 @@ import Footer from "./components/Footer";
 import UploadZone from "./components/UploadZone";
 import ImagePreviewCard from "./components/ImagePreviewCard";
 import AnalyzeControls from "./components/AnalyzeControls";
+import AlignmentUpload from "./components/AlignmentUpload";
 import ResultsDashboard from "./components/results/ResultsDashboard";
 import { analyzeImage } from "./api/analyzeImage";
 import type { AnalysisResult, WorkflowStage } from "./types";
@@ -14,42 +15,60 @@ import type { AnalysisResult, WorkflowStage } from "./types";
 export default function App() {
   const [stage, setStage] = useState<WorkflowStage>("idle");
   const [file, setFile] = useState<File | null>(null);
+  const [alignmentFiles, setAlignmentFiles] = useState<File[]>([]);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
+  const [currentStage, setCurrentStage] = useState<string | null>(null);
   const [result, setResult] = useState<AnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const handleFileSelected = useCallback((selected: File) => {
     setFile(selected);
-    setImageUrl(URL.createObjectURL(selected));
+    setAlignmentFiles([]);
+    setImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      const previewable = /\.(png|jpe?g|webp)$/i.test(selected.name);
+      return previewable ? URL.createObjectURL(selected) : null;
+    });
     setResult(null);
     setError(null);
     setStage("preview");
   }, []);
 
   const handleReset = useCallback(() => {
+    if (imageUrl) URL.revokeObjectURL(imageUrl);
     setFile(null);
+    setAlignmentFiles([]);
     setImageUrl(null);
     setResult(null);
     setError(null);
     setProgress(0);
+    setCurrentStage(null);
     setStage("idle");
-  }, []);
+  }, [imageUrl]);
 
   const handleAnalyze = useCallback(async () => {
     if (!file) return;
     setStage("analyzing");
     setProgress(0);
+    setCurrentStage("upload");
     setError(null);
     try {
-      const analysis = await analyzeImage(file, setProgress);
+      const analysis = await analyzeImage(
+        file,
+        (percent, pipelineStage) => {
+          setProgress(percent);
+          if (pipelineStage) setCurrentStage(pipelineStage);
+        },
+        { alignmentFiles }
+      );
       setResult(analysis);
       setStage("results");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Something went wrong during analysis.");
       setStage("error");
     }
-  }, [file]);
+  }, [file, alignmentFiles]);
 
   return (
     <div className="min-h-screen bg-canal-50">
@@ -61,25 +80,30 @@ export default function App() {
           <div className="mb-10 text-center">
             <p className="text-xs font-semibold uppercase tracking-wider text-teal-600">Run a Scan</p>
             <h2 className="mt-2 font-display text-3xl font-semibold tracking-tight text-canal-950">
-              Upload a drone image to begin
+              Upload a GeoTIFF to begin
             </h2>
             <p className="mx-auto mt-3 max-w-lg text-sm text-canal-600">
-              The model looks for vegetation overgrowth, silt buildup, floating debris, and structural
-              obstructions along the channel.
+              Upload a GeoTIFF orthomosaic. Optionally add a canal alignment (GeoJSON or shapefile) for
+              corridor-based reaches. Results are model or alignment-assisted — not field verified.
             </p>
           </div>
 
           {stage === "idle" && <UploadZone onFileSelected={handleFileSelected} />}
 
-          {(stage === "preview" || stage === "analyzing" || stage === "error") && imageUrl && file && (
+          {(stage === "preview" || stage === "analyzing" || stage === "error") && file && (
             <div className="space-y-6">
               <ImagePreviewCard
                 imageUrl={imageUrl}
                 fileName={file.name}
                 isAnalyzing={stage === "analyzing"}
                 progress={progress}
+                currentStage={currentStage}
                 onReset={handleReset}
               />
+
+              {stage !== "analyzing" && (
+                <AlignmentUpload files={alignmentFiles} onChange={setAlignmentFiles} />
+              )}
 
               {stage === "error" && error && (
                 <div className="flex items-start gap-3 rounded-lg border border-danger-100 bg-danger-100/60 p-4 text-sm text-danger-600">
@@ -108,8 +132,8 @@ export default function App() {
             </div>
           )}
 
-          {stage === "results" && result && imageUrl && file && (
-            <ResultsDashboard result={result} imageUrl={imageUrl} fileName={file.name} />
+          {stage === "results" && result && file && (
+            <ResultsDashboard result={result} imageUrl={imageUrl ?? ""} fileName={file.name} />
           )}
 
           {stage === "results" && (

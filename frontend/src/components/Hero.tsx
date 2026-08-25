@@ -26,9 +26,9 @@ export default function Hero() {
           </h1>
 
           <p className="mt-6 max-w-lg text-lg text-canal-100/80">
-            Upload a drone image of any canal reach and get an instant, AI-generated
-            assessment — blockage type, severity, and the affected channel area — built
-            for irrigation department field decisions.
+            Upload a GeoTIFF orthomosaic, optionally with a canal alignment. The app runs the
+            reference UNet canal pipeline asynchronously and shows predicted reaches on a map.
+            Results are model or alignment-assisted — not field verified.
           </p>
 
           <div className="mt-9 flex flex-wrap items-center gap-4">
@@ -36,7 +36,7 @@ export default function Hero() {
               href="#upload"
               className="inline-flex items-center gap-2 rounded-md bg-teal-500 px-6 py-3 text-sm font-semibold text-canal-950 transition hover:bg-teal-400"
             >
-              Analyze a Drone Image
+              Analyze an Orthomosaic
               <ArrowDown className="h-4 w-4" />
             </a>
             <a
@@ -49,16 +49,16 @@ export default function Hero() {
 
           <dl className="mt-14 grid max-w-lg grid-cols-3 gap-6 border-t border-white/10 pt-8 font-mono">
             <div>
-              <dt className="text-[11px] uppercase tracking-wider text-canal-100/50">Avg. Confidence</dt>
-              <dd className="mt-1 text-xl font-semibold text-teal-300">94.2%</dd>
+              <dt className="text-[11px] uppercase tracking-wider text-canal-100/50">Canal model</dt>
+              <dd className="mt-1 text-xl font-semibold text-teal-300">UNet</dd>
             </div>
             <div>
-              <dt className="text-[11px] uppercase tracking-wider text-canal-100/50">Analysis Time</dt>
-              <dd className="mt-1 text-xl font-semibold text-teal-300">~4s</dd>
+              <dt className="text-[11px] uppercase tracking-wider text-canal-100/50">Runtime modes</dt>
+              <dd className="mt-1 text-xl font-semibold text-teal-300">2</dd>
             </div>
             <div>
-              <dt className="text-[11px] uppercase tracking-wider text-canal-100/50">Blockage Classes</dt>
-              <dd className="mt-1 text-xl font-semibold text-teal-300">4</dd>
+              <dt className="text-[11px] uppercase tracking-wider text-canal-100/50">Field verified</dt>
+              <dd className="mt-1 text-xl font-semibold text-teal-300">No</dd>
             </div>
           </dl>
         </div>
@@ -76,7 +76,7 @@ export default function Hero() {
           </div>
           <div className="flex items-center gap-2">
             <Timer className="h-4 w-4 text-teal-400" />
-            Results in seconds, not a site visit
+            Results after tiled inference, not a site visit
           </div>
         </div>
       </div>

@@ -1,0 +1,339 @@
+# NOTEBOOK: 04_patch_tiling.ipynb
+# cells: 7
+
+
+===== CELL 0 (markdown) =====
+# Stage 4 — Patch Tiling for UNet
+
+Cuts all 5 ortho tiles into **512×512 PNG patches** with 50% overlap.
+
+**Split:**
+| Set | Tiles | Purpose |
+|---|---|---|
+| Train | ATTANUR_1, ATTANUR_4, SHAKAPUR | UNet training |
+| Val | ATTANUR_3 | Validation (never seen during training) |
+| Test | ATTANUR_2 | Final evaluation |
+
+**Output per patch:**
+- `images/` → RGB PNG  (3-channel, uint8)
+- `masks/`  → class mask PNG  (1-channel, values 0–5)
+- `alpha/`  → valid-pixel mask (0/255)
+
+**Class encoding:**
+```
+0 = background
+1 = main canal
+2 = lateral
+3 = distributary
+4 = FIC
+5 = field bund
+```
+
+**Skip patch if:** >70% pixels are nodata (alpha=0)
+
+
+===== CELL 1 (code) =====
+import os, json, warnings
+warnings.filterwarnings('ignore')
+
+import numpy as np
+import rasterio
+from rasterio.windows import Window
+import cv2
+from skimage.morphology import skeletonize
+from skimage.measure import label, regionprops
+from PIL import Image
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+DATA_DIR  = r'D:/Github/Canal Pipeline/TLBC_DSM_DTM/'
+PATCH_DIR = os.path.join(DATA_DIR, 'outputs', '04_patches')
+
+# Create split directories
+for split in ['train', 'val', 'test']:
+    for sub in ['images', 'masks', 'alpha']:
+        os.makedirs(os.path.join(PATCH_DIR, split, sub), exist_ok=True)
+
+PATCH_SIZE   = 512
+OVERLAP      = 0.5          # 50% overlap → stride = 256
+STRIDE       = int(PATCH_SIZE * (1 - OVERLAP))   # 256
+SKIP_NODATA  = 0.70         # skip if >70% nodata
+
+FILES = {
+    'ATTANUR_1': ('TLBC_D95_ATTANUR_1_ortho.tif', 0.0462, 'train'),
+    'ATTANUR_2': ('TLBC_D95_ATTANUR_2_ortho.tif', 0.0462, 'test'),
+    'ATTANUR_3': ('TLBC_D95_ATTANUR_3_ortho.tif', 0.0462, 'val'),
+    'ATTANUR_4': ('TLBC_D95_ATTANUR_4_ortho.tif', 0.0352, 'train'),
+    'SHAKAPUR':  ('TLBC_D95_SHAKAPUR_ortho.tif',  0.0342, 'train'),
+}
+
+print(f'Patch size : {PATCH_SIZE}px  (~{PATCH_SIZE*0.0462:.1f}m at 4.6cm/px)')
+print(f'Stride     : {STRIDE}px  (50% overlap)')
+print(f'Skip if    : >{int(SKIP_NODATA*100)}% nodata')
+print(f'Output dir : {PATCH_DIR}')
+
+
+===== CELL 2 (code) =====
+# ── Canal extraction (same as Stage 3) ───────────────────────────────────────
+
+def vari(r, g, b):
+    d = g.astype(float) + r.astype(float) - b.astype(float)
+    d = np.where(np.abs(d) < 1e-6, 1e-6, d)
+    return np.clip((g.astype(float) - r.astype(float)) / d, -1, 1)
+
+def linearity_filter(mask, min_aspect=2.5, max_blob_area=None):
+    labeled  = label(mask, connectivity=2)
+    filtered = np.zeros_like(mask, dtype=bool)
+    for region in regionprops(labeled):
+        if region.area < 8: continue
+        minor  = region.minor_axis_length
+        aspect = (region.major_axis_length / minor) if minor > 1e-3 else region.major_axis_length
+        if aspect >= min_aspect or (max_blob_area and region.area <= max_blob_area):
+            filtered[labeled == region.label] = True
+    return filtered
+
+def make_mask(r, g, b, alpha, px_m):
+    """
+    Returns a single-channel uint8 mask with class IDs:
+    0=bg  1=main  2=lateral  3=distrib  4=FIC  5=bund
+    """
+    valid  = alpha > 128
+    bright = (r + g + b) / 3.0
+    grey   = np.abs(r-g) + np.abs(g-b)
+    vi     = vari(r, g, b)
+
+    main_min  = int(8.0  / px_m)
+    lat_min   = int(3.0  / px_m)
+    fic_min   = max(2, int(0.15 / px_m))
+    fic_max   = int(0.5  / px_m)
+    conn_px   = max(5, int(3.0  / px_m))
+
+    k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
+    k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+
+    # concrete
+    c_raw = (valid & (vi < 0.06) & (bright > 120) & (grey < 25)).astype(np.uint8)
+    c_raw = cv2.morphologyEx(c_raw, cv2.MORPH_OPEN,  k3)
+    c_raw = cv2.morphologyEx(c_raw, cv2.MORPH_CLOSE, k5)
+    concrete = linearity_filter(c_raw.astype(bool), min_aspect=2.5,
+                                max_blob_area=int((3.0/px_m)**2))
+    c_dist = cv2.distanceTransform(concrete.astype(np.uint8)*255, cv2.DIST_L2, 5) * 2
+    c_skel = skeletonize(concrete)
+
+    # classify concrete by width
+    mask = np.zeros(r.shape, dtype=np.uint8)   # 0 = background
+    c_labels = label(concrete, connectivity=2)
+    for region in regionprops(c_labels):
+        comp = c_labels == region.label
+        sp   = comp & c_skel
+        med  = float(np.median(c_dist[sp])) if sp.any() else 0
+        if   med >= main_min: mask[comp] = 1   # main
+        elif med >= lat_min:  mask[comp] = 2   # lateral
+        else:                 mask[comp] = 3   # distributary
+
+    # earthen
+    e_raw = (valid & (vi < 0.09) & (bright > 65) & (bright < 215)
+             & (r > b + 3) & (grey >= 10) & ~concrete).astype(np.uint8)
+    e_raw = cv2.morphologyEx(e_raw, cv2.MORPH_OPEN,  k3)
+    e_raw = cv2.morphologyEx(e_raw, cv2.MORPH_CLOSE, k3)
+    earthen = linearity_filter(e_raw.astype(bool), min_aspect=2.5,
+                               max_blob_area=int((2.0/px_m)**2))
+    e_dist = cv2.distanceTransform(earthen.astype(np.uint8)*255, cv2.DIST_L2, 5) * 2
+    e_skel = skeletonize(earthen)
+
+    ck = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (conn_px*2+1, conn_px*2+1))
+    c_dil = cv2.dilate(concrete.astype(np.uint8), ck).astype(bool)
+    e_labels = label(earthen, connectivity=2)
+    for region in regionprops(e_labels):
+        comp = e_labels == region.label
+        sp   = comp & e_skel
+        if not sp.any():
+            mask[comp] = 5; continue
+        med     = float(np.median(e_dist[sp]))
+        touches = bool((comp & c_dil).any())
+        mask[comp] = 4 if (touches and fic_min <= med <= fic_max) else 5
+
+    mask[~valid] = 0   # nodata → background
+    return mask
+
+print('Mask generator ready')
+
+
+===== CELL 3 (code) =====
+# ── Tiling loop ───────────────────────────────────────────────────────────────
+
+dataset_info = {}
+total_patches = 0
+
+for TAG, (fname, px_m, split) in FILES.items():
+    fpath = os.path.join(DATA_DIR, fname)
+    img_dir   = os.path.join(PATCH_DIR, split, 'images')
+    mask_dir  = os.path.join(PATCH_DIR, split, 'masks')
+    alpha_dir = os.path.join(PATCH_DIR, split, 'alpha')
+
+    print(f'\n{"="*55}\n  {TAG}  [{split}]\n{"="*55}')
+
+    saved = skipped_nodata = skipped_nocanal = 0
+    class_pixel_counts = [0]*6
+
+    with rasterio.open(fpath) as src:
+        W, H = src.width, src.height
+        cols = list(range(0, W - PATCH_SIZE + 1, STRIDE))
+        rows = list(range(0, H - PATCH_SIZE + 1, STRIDE))
+        total_candidates = len(cols) * len(rows)
+        print(f'  Image: {W}x{H}  |  '
+              f'Grid: {len(cols)}x{len(rows)} = {total_candidates:,} candidates')
+
+        for ri, row_off in enumerate(rows):
+            for ci, col_off in enumerate(cols):
+                win  = Window(col_off, row_off, PATCH_SIZE, PATCH_SIZE)
+                data = src.read([1,2,3,4], window=win).astype(np.float32)
+                r, g, b, a = data[0], data[1], data[2], data[3]
+
+                # skip mostly-nodata patches
+                nodata_ratio = (a == 0).sum() / (PATCH_SIZE * PATCH_SIZE)
+                if nodata_ratio > SKIP_NODATA:
+                    skipped_nodata += 1
+                    continue
+
+                # build 5-class mask
+                class_mask = make_mask(r, g, b, a, px_m)
+
+                # skip patches with zero canal pixels (pure background/vegetation)
+                if (class_mask > 0).sum() == 0:
+                    skipped_nocanal += 1
+                    continue
+
+                # file name: TAG_row_col
+                name = f'{TAG}_r{row_off:06d}_c{col_off:06d}'
+
+                # save RGB image (uint8)
+                rgb_img = np.stack([r, g, b], axis=2).clip(0,255).astype(np.uint8)
+                Image.fromarray(rgb_img).save(
+                    os.path.join(img_dir, name + '.png'))
+
+                # save class mask (single channel, values 0-5)
+                Image.fromarray(class_mask).save(
+                    os.path.join(mask_dir, name + '.png'))
+
+                # save alpha / valid mask (0 or 255)
+                alpha_img = (a > 128).astype(np.uint8) * 255
+                Image.fromarray(alpha_img).save(
+                    os.path.join(alpha_dir, name + '.png'))
+
+                for c in range(6):
+                    class_pixel_counts[c] += int((class_mask == c).sum())
+                saved += 1
+
+            # progress every 10 rows
+            if (ri+1) % 10 == 0:
+                print(f'  Row {ri+1}/{len(rows)}  saved={saved}  '
+                      f'skip_nodata={skipped_nodata}  skip_nocanal={skipped_nocanal}')
+
+    total_patches += saved
+    total_canal_px = sum(class_pixel_counts[1:])
+    dataset_info[TAG] = {
+        'split': split, 'saved': saved,
+        'skipped_nodata': skipped_nodata,
+        'skipped_nocanal': skipped_nocanal,
+        'class_pixel_counts': {
+            'background': class_pixel_counts[0],
+            'main':       class_pixel_counts[1],
+            'lateral':    class_pixel_counts[2],
+            'distrib':    class_pixel_counts[3],
+            'fic':        class_pixel_counts[4],
+            'bund':       class_pixel_counts[5],
+        },
+        'canal_pixel_pct': round(total_canal_px /
+            max(1, sum(class_pixel_counts)) * 100, 2),
+    }
+    print(f'  DONE: {saved} patches saved  '
+          f'(skip nodata={skipped_nodata}, skip nocanal={skipped_nocanal})')
+    print(f'  Canal pixels: {dataset_info[TAG]["canal_pixel_pct"]}%  |  '
+          f'Class counts: main={class_pixel_counts[1]:,}  '
+          f'lat={class_pixel_counts[2]:,}  '
+          f'dist={class_pixel_counts[3]:,}  '
+          f'fic={class_pixel_counts[4]:,}  '
+          f'bund={class_pixel_counts[5]:,}')
+
+dataset_info['TOTAL'] = {'total_patches': total_patches}
+with open(os.path.join(PATCH_DIR, 'dataset_info.json'), 'w') as f:
+    json.dump(dataset_info, f, indent=2)
+
+print(f'\nTotal patches saved: {total_patches:,}')
+print(f'Dataset info -> {PATCH_DIR}/dataset_info.json')
+
+
+===== CELL 4 (markdown) =====
+## Summary table + visual check
+
+
+===== CELL 5 (code) =====
+# Summary table
+print(f'{"Tile":<12} {"Split":<7} {"Patches":>8} {"Canal%":>8} '
+      f'{"Main":>8} {"Lat":>8} {"Dist":>8} {"FIC":>8} {"Bund":>8}')
+print('-'*80)
+train_total = val_total = test_total = 0
+for tag, info in dataset_info.items():
+    if tag == 'TOTAL': continue
+    cc = info['class_pixel_counts']
+    print(f'{tag:<12} {info["split"]:<7} {info["saved"]:>8} '
+          f'{info["canal_pixel_pct"]:>8} '
+          f'{cc["main"]:>8,} {cc["lateral"]:>8,} {cc["distrib"]:>8,} '
+          f'{cc["fic"]:>8,} {cc["bund"]:>8,}')
+    if info['split'] == 'train': train_total += info['saved']
+    elif info['split'] == 'val': val_total   += info['saved']
+    else:                        test_total  += info['saved']
+
+print('-'*80)
+print(f'Train: {train_total}  Val: {val_total}  Test: {test_total}  '
+      f'Total: {train_total+val_total+test_total}')
+
+
+===== CELL 6 (code) =====
+# Visual check — show 8 random patches from train set with their masks
+import random
+
+CLASS_COLOURS = {
+    0: [0,   0,   0  ],   # background — black
+    1: [220, 30,  30 ],   # main canal — red
+    2: [255, 140, 0  ],   # lateral — orange
+    3: [255, 230, 0  ],   # distributary — yellow
+    4: [0,   210, 210],   # FIC — cyan
+    5: [139, 90,  43 ],   # bund — brown
+}
+
+def mask_to_rgb(mask):
+    out = np.zeros((*mask.shape, 3), dtype=np.uint8)
+    for cls, col in CLASS_COLOURS.items():
+        out[mask == cls] = col
+    return out
+
+train_img_dir  = os.path.join(PATCH_DIR, 'train', 'images')
+train_mask_dir = os.path.join(PATCH_DIR, 'train', 'masks')
+samples = random.sample(os.listdir(train_img_dir), min(8, len(os.listdir(train_img_dir))))
+
+fig, axes = plt.subplots(2, 8, figsize=(28, 8))
+fig.suptitle('Stage 4 — Sample patches (top=RGB, bottom=5-class mask)', fontsize=12)
+
+for i, fname in enumerate(samples):
+    img  = np.array(Image.open(os.path.join(train_img_dir,  fname)))
+    msk  = np.array(Image.open(os.path.join(train_mask_dir, fname)))
+    axes[0,i].imshow(img);            axes[0,i].axis('off')
+    axes[0,i].set_title(fname[:20], fontsize=6)
+    axes[1,i].imshow(mask_to_rgb(msk)); axes[1,i].axis('off')
+
+legend_patches = [
+    Patch(facecolor='#dc1e1e', label='Main'),
+    Patch(facecolor='#ff8c00', label='Lateral'),
+    Patch(facecolor='#ffe600', label='Distributary'),
+    Patch(facecolor='#00d2d2', label='FIC'),
+    Patch(facecolor='#8b5a2b', label='Bund'),
+]
+fig.legend(handles=legend_patches, loc='lower center', ncol=5,
+           fontsize=10, bbox_to_anchor=(0.5, 0.0))
+plt.tight_layout(rect=[0, 0.05, 1, 1])
+out = os.path.join(PATCH_DIR, 'sample_patches.png')
+plt.savefig(out, dpi=120, bbox_inches='tight')
+plt.show()
+print(f'Sample saved -> {out}')

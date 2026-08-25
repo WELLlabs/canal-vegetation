@@ -1,1 +1,1 @@
-"""Canal pipeline library — tiling, inference, training, blockage."""
+"""Canal pipeline library — tiling, inference, blockage."""

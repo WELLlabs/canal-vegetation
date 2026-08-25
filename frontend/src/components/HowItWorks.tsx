@@ -3,18 +3,18 @@ import { UploadCloud, ScanSearch, FileCheck2 } from "lucide-react";
 const STEPS = [
   {
     icon: UploadCloud,
-    title: "Upload the survey image",
-    body: "Drop in a drone image of the canal reach — top-down or oblique angles both work.",
+    title: "Create a project and upload",
+    body: "Upload a GeoTIFF orthomosaic. Optionally attach a canal alignment (GeoJSON or shapefile with sidecars).",
   },
   {
     icon: ScanSearch,
-    title: "Model runs inference",
-    body: "The vision model scans for obstruction signatures — vegetation, silt, debris, or structural damage.",
+    title: "Async canal prediction",
+    body: "The UNet canal model runs tiled inference with postprocessing, then blockage and structural-damage scoring.",
   },
   {
     icon: FileCheck2,
-    title: "Get a field-ready report",
-    body: "Review status, severity, and affected area, then download a report for dispatch or records.",
+    title: "Inspect reaches on the map",
+    body: "Click polygons to view thumbnails and scores. Outputs are model or alignment-assisted — not field verified.",
   },
 ];
 

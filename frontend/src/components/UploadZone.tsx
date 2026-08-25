@@ -5,7 +5,13 @@ interface UploadZoneProps {
   onFileSelected: (file: File) => void;
 }
 
-const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const ACCEPTED_EXT = [".tif", ".tiff"];
+const ACCEPT_ATTR = "image/tiff,.tif,.tiff";
+
+function isAllowed(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return ACCEPTED_EXT.some((ext) => name.endsWith(ext));
+}
 
 export default function UploadZone({ onFileSelected }: UploadZoneProps) {
   const [isDragging, setIsDragging] = useState(false);
@@ -16,8 +22,8 @@ export default function UploadZone({ onFileSelected }: UploadZoneProps) {
     (files: FileList | null) => {
       if (!files || files.length === 0) return;
       const file = files[0];
-      if (!ACCEPTED_TYPES.includes(file.type)) {
-        setError("Unsupported file type. Please upload a JPG, PNG, or WEBP image.");
+      if (!isAllowed(file)) {
+        setError("Unsupported file type. Upload a GeoTIFF orthomosaic (.tif / .tiff).");
         return;
       }
       setError(null);
@@ -52,7 +58,7 @@ export default function UploadZone({ onFileSelected }: UploadZoneProps) {
         <input
           ref={inputRef}
           type="file"
-          accept={ACCEPTED_TYPES.join(",")}
+          accept={ACCEPT_ATTR}
           className="hidden"
           onChange={(e) => handleFiles(e.target.files)}
         />
@@ -66,15 +72,15 @@ export default function UploadZone({ onFileSelected }: UploadZoneProps) {
         </div>
 
         <p className="font-display text-lg font-semibold text-canal-950">
-          Drop a drone image here
+          Drop a GeoTIFF orthomosaic
         </p>
         <p className="mt-1.5 text-sm text-canal-600">
-          or click to browse — JPG, PNG, or WEBP, up to 20MB
+          RGB or RGBA GeoTIFF — large mosaics are processed tile-by-tile
         </p>
 
         <div className="mt-6 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wide text-canal-500">
           <ImageIcon className="h-3.5 w-3.5" />
-          Top-down or oblique aerial angle recommended
+          Optional alignment (GeoJSON or shapefile) on the next step
         </div>
       </div>
 

@@ -1,4 +1,3 @@
-import { Waves } from "lucide-react";
 import logo from "../assets/Full-logo_White.png"
 export default function Footer() {
   return (

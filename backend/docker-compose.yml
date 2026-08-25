@@ -1,0 +1,73 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  fastapi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/jobs.db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /app/data
+      OUTPUT_DIR: /app/outputs
+      MODEL_DIR: /app/app/models/model_weights
+      UPLOAD_DIR: /app/data/uploads
+      USE_CELERY: "true"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./app/models/model_weights:/app/app/models/model_weights
+    depends_on:
+      - redis
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/jobs.db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      REDIS_URL: redis://redis:6379/0
+      DATA_DIR: /app/data
+      OUTPUT_DIR: /app/outputs
+      MODEL_DIR: /app/app/models/model_weights
+      UPLOAD_DIR: /app/data/uploads
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./app/models/model_weights:/app/app/models/model_weights
+    depends_on:
+      - redis
+    command: celery -A app.workers.tasks.celery_app worker --loglevel=info --concurrency=1
+
+  celery_worker_gpu:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite:////app/data/jobs.db
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      MODEL_DIR: /app/app/models/model_weights
+      DATA_DIR: /app/data
+      OUTPUT_DIR: /app/outputs
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+      - ./app/models/model_weights:/app/app/models/model_weights
+    depends_on:
+      - redis
+    gpus: all
+    command: celery -A app.workers.tasks.celery_app worker --loglevel=info --concurrency=1

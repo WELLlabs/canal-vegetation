@@ -1,4 +1,3 @@
-import { Waves } from "lucide-react";
 import logo from "../assets/WELL-LABS_Coloured-logo.png";
 
 export default function NavBar() {

@@ -15,6 +15,15 @@ export function downloadReport(result: AnalysisResult, fileName: string) {
     `Severity:               ${result.severity}`,
     `Affected channel area:  ${result.affectedAreaPercent.toFixed(1)}%`,
     "",
+    ...(result.job
+      ? [
+          `Job ID:                 ${result.job.job_id}`,
+          `Total reaches:          ${result.job.summary.total_reaches}`,
+          `Clear / partial / full: ${result.job.summary.clear} / ${result.job.summary.partial} / ${result.job.summary.full ?? result.job.summary.blocked ?? 0}`,
+          `Silt low / med / high:  ${result.job.summary.silt_low} / ${result.job.summary.silt_medium} / ${result.job.summary.silt_high}`,
+          "",
+        ]
+      : []),
     "AI RECOMMENDATIONS",
     "-------------------",
     ...result.recommendations.map((r, i) => `${i + 1}. ${r}`),

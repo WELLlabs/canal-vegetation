@@ -1,0 +1,490 @@
+# NOTEBOOK: 06_fic_training.ipynb
+# cells: 10
+
+
+===== CELL 0 (markdown) =====
+# Cell 0 — Stage 6: FIC Detection Training
+
+**Goal:** Train a binary segmentation model to detect Field Irrigation Channels (FICs)
+
+| Cell | Purpose | Time |
+|------|---------|------|
+| 0 | Header | - |
+| 1 | Config & imports | ~2s |
+| 2 | Load FIC labels | ~10s |
+| 3 | Dataset & dataloaders | ~30s |
+| 4 | Model initialization | ~5s |
+| 5 | Training loop (40 epochs) | ~4-6 hrs |
+| 6 | Validation metrics | ~1 min |
+| 7 | Sample predictions | ~30s |
+| 8 | ATTANUR inference | ~2-3 hrs |
+| 9 | ATTANUR visualization | ~2 min |
+
+**Input:** FIC_LABELS from Stage 3  
+**Output:** `best_fic_unet.pth`, ATTANUR FIC maps
+
+
+===== CELL 1 (code) =====
+# Cell 1 — Config & imports
+import os, warnings, gc, time
+warnings.filterwarnings('ignore')
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.utils.data import Dataset, DataLoader
+import segmentation_models_pytorch as smp
+
+DATA_DIR = r'D:/Github/Canal Pipeline/TLBC_DSM_DTM/'
+OUT_DIR = os.path.join(DATA_DIR, 'outputs', '06_fic')
+os.makedirs(OUT_DIR, exist_ok=True)
+
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f'Device: {DEVICE}')
+
+
+===== CELL 2 (code) =====
+# Cell 2 — Load FIC labels from annotation_v2
+from pathlib import Path
+import json
+import cv2
+
+ANNO_V2 = os.path.join(DATA_DIR, 'annotation_v2')
+
+# Find all JSON files with 'fic' labels
+fic_patches = []
+json_files = sorted(Path(ANNO_V2).glob('*.json'))
+print(f'Scanning {len(json_files)} annotation files for FIC labels...\n')
+
+for jf in json_files:
+    with open(jf) as f:
+        anno = json.load(f)
+    
+    # Check if this patch has 'fic' label
+    has_fic = False
+    for shape in anno.get('shapes', []):
+        if shape['label'].lower().strip() == 'fic':
+            has_fic = True
+            break
+    
+    if has_fic:
+        # Find corresponding raw.npy file
+        basename = jf.stem
+        raw_file = os.path.join(ANNO_V2, f'{basename}_raw.npy')
+        
+        if os.path.exists(raw_file):
+            fic_patches.append({
+                'json_path': str(jf),
+                'raw_path': raw_file,
+                'basename': basename
+            })
+
+if len(fic_patches) == 0:
+    print('ERROR: No FIC patches found in annotation_v2/')
+    print('\nLabel more patches with FIC annotations:')
+    print('  python -m labelme annotation_v2/')
+    raise FileNotFoundError('No FIC patches available!')
+
+print(f'Found {len(fic_patches)} patches with FIC labels')
+print(f'Source: {ANNO_V2}')
+print(f'Sample: {fic_patches[0]["basename"]}')
+
+
+===== CELL 3 (code) =====
+# Cell 3 — Dataset, augmentation & dataloaders for FIC patches
+import albumentations as A
+from sklearn.model_selection import train_test_split
+
+train_aug = A.Compose([
+    A.HorizontalFlip(p=0.5),
+    A.VerticalFlip(p=0.5),
+    A.RandomRotate90(p=0.5),
+    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.15, rotate_limit=45, p=0.5),
+    A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+    A.GaussNoise(var_limit=(5.0, 20.0), p=0.3),
+])
+
+class FICDataset(Dataset):
+    def __init__(self, patches_list, augment=None):
+        self.patches = patches_list
+        self.augment = augment
+        self.mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+        self.std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+    
+    def __len__(self):
+        return len(self.patches)
+    
+    def __getitem__(self, idx):
+        patch_info = self.patches[idx]
+        
+        # Load RGB
+        rgb = np.load(patch_info['raw_path'])
+        
+        # Load JSON and generate FIC mask
+        with open(patch_info['json_path']) as f:
+            anno = json.load(f)
+        
+        h, w = anno['imageHeight'], anno['imageWidth']
+        mask = np.zeros((h, w), dtype=np.uint8)
+        
+        # Draw FIC shapes on mask
+        for shape in anno.get('shapes', []):
+            if shape['label'].lower().strip() == 'fic':
+                pts = np.array(shape['points'], dtype=np.int32)
+                if shape['shape_type'] == 'polygon':
+                    cv2.fillPoly(mask, [pts], 255)
+                elif shape['shape_type'] == 'line':
+                    cv2.polylines(mask, [pts], False, 255, thickness=8)
+                elif shape['shape_type'] == 'rectangle':
+                    cv2.rectangle(mask, tuple(pts[0]), tuple(pts[1]), 255, -1)
+        
+        # Apply augmentation
+        if self.augment:
+            aug = self.augment(image=rgb, mask=mask)
+            rgb, mask = aug['image'], aug['mask']
+        
+        # Normalize
+        rgb_t = torch.from_numpy(rgb).permute(2, 0, 1).float() / 255.0
+        rgb_t = (rgb_t - self.mean) / self.std
+        mask_t = torch.from_numpy(mask).float().unsqueeze(0) / 255.0
+        
+        return rgb_t, mask_t
+
+train_patches, val_patches = train_test_split(fic_patches, test_size=0.15, random_state=42)
+train_ds = FICDataset(train_patches, augment=train_aug)
+val_ds = FICDataset(val_patches, augment=None)
+train_loader = DataLoader(train_ds, batch_size=8, shuffle=True, num_workers=0, pin_memory=True)
+val_loader = DataLoader(val_ds, batch_size=8, shuffle=False, num_workers=0, pin_memory=True)
+
+print(f'Train: {len(train_ds)} | Val: {len(val_ds)}')
+print(f'Train batches: {len(train_loader)} | Val batches: {len(val_loader)}')
+
+
+===== CELL 4 (code) =====
+# Cell 4 — Initialize model
+model = smp.Unet(
+    encoder_name='resnet34',
+    encoder_weights='imagenet',
+    in_channels=3,
+    classes=1
+).to(DEVICE)
+
+criterion = nn.BCEWithLogitsLoss()
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-5)
+
+print('Model initialized')
+print(f'Parameters: {sum(p.numel() for p in model.parameters())/1e6:.1f}M')
+
+
+===== CELL 5 (code) =====
+# Cell 5 — Training loop
+import matplotlib.pyplot as plt
+
+EPOCHS = 60
+PATIENCE = 8
+best_val_loss = float('inf')
+patience_counter = 0
+best_model_path = os.path.join(OUT_DIR, 'best_fic_unet.pth')
+train_losses = []
+val_losses = []
+
+print(f'Training for {EPOCHS} epochs (patience={PATIENCE})\n')
+
+for epoch in range(EPOCHS):
+    t0 = time.time()
+    model.train()
+    train_loss = 0.0
+    for imgs, masks in train_loader:
+        imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
+        optimizer.zero_grad()
+        with torch.amp.autocast('cuda'):
+            preds = model(imgs)
+            loss = criterion(preds, masks)
+        loss.backward()
+        optimizer.step()
+        train_loss += loss.item()
+    train_loss /= len(train_loader)
+    train_losses.append(train_loss)
+    
+    model.eval()
+    val_loss = 0.0
+    with torch.no_grad():
+        for imgs, masks in val_loader:
+            imgs, masks = imgs.to(DEVICE), masks.to(DEVICE)
+            with torch.amp.autocast('cuda'):
+                preds = model(imgs)
+                loss = criterion(preds, masks)
+            val_loss += loss.item()
+    val_loss /= len(val_loader)
+    val_losses.append(val_loss)
+    
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        torch.save(model.state_dict(), best_model_path)
+        patience_counter = 0
+        best_epoch = epoch
+    else:
+        patience_counter += 1
+    
+    elapsed = time.time() - t0
+    print(f'Epoch {epoch+1}/{EPOCHS} | Train: {train_loss:.4f} | Val: {val_loss:.4f} | '
+          f'Time: {elapsed:.1f}s | Patience: {patience_counter}/{PATIENCE}')
+    
+    if patience_counter >= PATIENCE:
+        print(f'\nEarly stopping at epoch {epoch+1}')
+        print(f'Best model from epoch {best_epoch+1} with val_loss={best_val_loss:.4f}')
+        break
+
+print(f'\nTraining complete! Best model: {best_model_path}')
+
+plt.figure(figsize=(10, 5))
+plt.plot(train_losses, label='Train Loss')
+plt.plot(val_losses, label='Val Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.title('FIC Training Curves')
+plt.grid(True, alpha=0.3)
+plt.savefig(os.path.join(OUT_DIR, 'training_curves.png'), dpi=120, bbox_inches='tight')
+plt.show()
+
+
+===== CELL 6 (code) =====
+# Cell 6 — Load best model & compute validation metrics
+from sklearn.metrics import precision_score, recall_score, f1_score
+
+gc.collect()
+torch.cuda.empty_cache()
+
+model.load_state_dict(torch.load(best_model_path, map_location=DEVICE, weights_only=True))
+model.eval()
+print(f'Loaded best model from: {best_model_path}\n')
+
+all_preds = []
+all_targets = []
+
+with torch.no_grad():
+    for imgs, masks in val_loader:
+        imgs = imgs.to(DEVICE)
+        with torch.amp.autocast('cuda'):
+            preds = torch.sigmoid(model(imgs))
+        preds_bin = (preds.cpu().numpy() > 0.5).astype(np.uint8)
+        masks_bin = (masks.numpy() > 0.5).astype(np.uint8)
+        all_preds.append(preds_bin.flatten())
+        all_targets.append(masks_bin.flatten())
+
+all_preds = np.concatenate(all_preds)
+all_targets = np.concatenate(all_targets)
+
+precision = precision_score(all_targets, all_preds, zero_division=0)
+recall = recall_score(all_targets, all_preds, zero_division=0)
+f1 = f1_score(all_targets, all_preds, zero_division=0)
+
+print(f'Validation Metrics:')
+print(f'  Precision: {precision:.4f}')
+print(f'  Recall: {recall:.4f}')
+print(f'  F1 Score: {f1:.4f}')
+
+
+===== CELL 7 (code) =====
+# Cell 7 — Sample predictions visualization
+import random
+
+n_vis = 6
+vis_indices = random.sample(range(len(val_ds)), min(n_vis, len(val_ds)))
+fig, axes = plt.subplots(n_vis, 3, figsize=(12, 4*n_vis))
+if n_vis == 1:
+    axes = axes[np.newaxis, :]
+
+mean = np.array([0.485, 0.456, 0.406]).reshape(3, 1, 1)
+std = np.array([0.229, 0.224, 0.225]).reshape(3, 1, 1)
+
+for idx, sample_idx in enumerate(vis_indices):
+    img_t, mask_t = val_ds[sample_idx]
+    with torch.no_grad():
+        img_batch = img_t.unsqueeze(0).to(DEVICE)
+        with torch.amp.autocast('cuda'):
+            pred = torch.sigmoid(model(img_batch))[0, 0].cpu().numpy()
+    img_np = (img_t.numpy() * std + mean).transpose(1, 2, 0)
+    img_np = np.clip(img_np, 0, 1)
+    mask_np = mask_t.numpy()[0]
+    pred_bin = (pred > 0.5).astype(np.uint8)
+    
+    axes[idx, 0].imshow(img_np)
+    axes[idx, 0].set_title('Input Image')
+    axes[idx, 0].axis('off')
+    axes[idx, 1].imshow(mask_np, cmap='gray')
+    axes[idx, 1].set_title('Ground Truth')
+    axes[idx, 1].axis('off')
+    axes[idx, 2].imshow(pred_bin, cmap='gray')
+    axes[idx, 2].set_title('Prediction')
+    axes[idx, 2].axis('off')
+
+plt.suptitle('FIC Detection — Validation Samples', fontsize=14, y=1.001)
+plt.tight_layout()
+fig.savefig(os.path.join(OUT_DIR, 'fic_predictions.png'), dpi=120, bbox_inches='tight')
+plt.show()
+print(f'Saved: {os.path.join(OUT_DIR, "fic_predictions.png")}')
+
+
+===== CELL 8 (code) =====
+# Cell 8 — ATTANUR full-mosaic inference (LOWER THRESHOLD for better FIC detection)
+import rasterio
+from rasterio.windows import Window
+import cv2
+
+ATTANUR_FILES = {
+    'ATTANUR_1': r'D:/Github/Canal Pipeline/TLBC_DSM_DTM/TLBC_D95_ATTANUR_1_ortho.tif',
+    'ATTANUR_2': os.path.join(DATA_DIR, 'TLBC_D95_ATTANUR_2_ortho.tif'),
+    'ATTANUR_3': r'D:/Github/Canal Pipeline/TLBC_DSM_DTM/TLBC_D95_ATTANUR_3_ortho.tif',
+    'ATTANUR_4': r'D:/Github/Canal Pipeline/TLBC_DSM_DTM/TLBC_D95_ATTANUR_4_ortho.tif',
+}
+TILE = 512
+STEP = 384
+DS = 8
+THRESHOLD = 0.2  # LOWERED from 0.4 for more sensitive FIC detection
+IMG_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+IMG_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+print(f'FIC Detection Threshold: {THRESHOLD} (lowered for better sensitivity)')
+print(f'Note: FICs are 1-2m wide, ~3-5 pixels at DS={DS}\n')
+
+def tta_predict_4(model, img_t):
+    preds = []
+    for k in range(4):
+        x = torch.rot90(img_t, k, dims=[2, 3])
+        with torch.amp.autocast('cuda'):
+            prob = torch.sigmoid(model(x))
+        prob = torch.rot90(prob, -k, dims=[2, 3])
+        preds.append(prob)
+    return torch.stack(preds).mean(dim=0)
+
+def build_fic_mask(tag, fpath, model):
+    with rasterio.open(fpath) as src:
+        W, H = src.width, src.height
+    out_h, out_w = H // DS, W // DS
+    tile_ds = TILE // DS
+    pred_sum = np.zeros((out_h, out_w), dtype=np.float32)
+    count_map = np.zeros((out_h, out_w), dtype=np.float32)
+    total = ((H - TILE) // STEP + 1) * ((W - TILE) // STEP + 1)
+    done = 0
+    t0 = time.time()
+    
+    with rasterio.open(fpath) as src:
+        for row in range(0, H - TILE + 1, STEP):
+            for col in range(0, W - TILE + 1, STEP):
+                data = src.read([1, 2, 3, 4], window=Window(col, row, TILE, TILE))
+                valid = data[3] == 255
+                if valid.sum() < TILE * TILE * 0.3:
+                    done += 1
+                    continue
+                rgb = data[:3].astype(np.float32) / 255.0
+                img_t = torch.from_numpy(rgb).float()
+                img_t = (img_t - IMG_MEAN) / IMG_STD
+                with torch.no_grad():
+                    prob = tta_predict_4(model, img_t.unsqueeze(0).to(DEVICE))
+                    prob = prob.cpu().numpy()[0, 0].astype(np.float32)
+                prob[~valid] = 0
+                valid_f = valid.astype(np.float32)
+                prob_ds = prob.reshape(tile_ds, DS, tile_ds, DS).mean(axis=(1, 3))
+                valid_ds = valid_f.reshape(tile_ds, DS, tile_ds, DS).mean(axis=(1, 3))
+                r0, c0 = row // DS, col // DS
+                r1, c1 = min(r0 + tile_ds, out_h), min(c0 + tile_ds, out_w)
+                pred_sum[r0:r1, c0:c1] += prob_ds[:r1-r0, :c1-c0]
+                count_map[r0:r1, c0:c1] += valid_ds[:r1-r0, :c1-c0]
+                done += 1
+            if done % 500 == 0:
+                elapsed = time.time() - t0
+                rate = done / max(1, elapsed)
+                eta = (total - done) / max(1, rate)
+                print(f'  {done}/{total} tiles ({elapsed:.0f}s, ETA {eta/60:.0f}min)')
+    
+    pred_avg = np.where(count_map > 0, pred_sum / count_map, 0)
+    fic_raw = (pred_avg > THRESHOLD).astype(np.uint8)
+    
+    # Light morphological cleanup (minimal - FICs are thin!)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))  # Small kernel
+    fic_mask = cv2.morphologyEx(fic_raw, cv2.MORPH_OPEN, kernel, iterations=1)
+    fic_mask = cv2.morphologyEx(fic_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+    
+    # NO strict component filtering - FICs are small by nature
+    # Keep all connected components >= 20 pixels (very lenient)
+    n_labels, labels, stats, _ = cv2.connectedComponentsWithStats(fic_mask, connectivity=8)
+    fic_filtered = np.zeros_like(fic_mask)
+    for i in range(1, n_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        if area >= 20:  # Very lenient threshold
+            fic_filtered[labels == i] = 1
+    
+    elapsed = time.time() - t0
+    raw_pct = fic_raw.sum() / max(1, fic_raw.size) * 100
+    filt_pct = fic_filtered.sum() / max(1, fic_filtered.size) * 100
+    print(f'  {tag}: {out_w}x{out_h} | Raw: {fic_raw.sum()} px ({raw_pct:.2f}%) | Filtered: {fic_filtered.sum()} px ({filt_pct:.2f}%) | {elapsed/60:.1f}min')
+    return fic_filtered, pred_avg
+
+fic_results = {}
+for tag, fpath in ATTANUR_FILES.items():
+    print(f'\nProcessing {tag}...')
+    fic_mask, fic_prob = build_fic_mask(tag, fpath, model)
+    fic_results[tag] = {'mask': fic_mask, 'prob': fic_prob, 'fpath': fpath}
+    np.savez_compressed(os.path.join(OUT_DIR, f'{tag}_fic_mask.npz'), mask=fic_mask, prob=fic_prob)
+    gc.collect()
+    torch.cuda.empty_cache()
+
+print(f'\n{"="*60}')
+print(f'Inference complete for {len(fic_results)} images')
+print(f'Threshold: {THRESHOLD} (lower = more FICs detected)')
+print(f'{"="*60}')
+
+
+===== CELL 9 (code) =====
+# Cell 9 — ATTANUR visualization
+VIS_MAX = 2000
+
+def contrast_stretch(rgb, valid_mask):
+    out = np.zeros_like(rgb, dtype=np.uint8)
+    for c in range(3):
+        ch = rgb[:,:,c].astype(np.float64)
+        vpx = ch[valid_mask]
+        if vpx.size < 100:
+            continue
+        lo, hi = np.percentile(vpx, [2, 98])
+        if hi - lo < 5:
+            continue
+        s = np.clip((ch - lo) / (hi - lo) * 255, 0, 255).astype(np.uint8)
+        out[:,:,c] = s
+    return out
+
+n_imgs = len(fic_results)
+fig, axes = plt.subplots(n_imgs, 2, figsize=(16, 7*n_imgs))
+if n_imgs == 1:
+    axes = axes[np.newaxis, :]
+
+for idx, (tag, data) in enumerate(fic_results.items()):
+    fpath = data['fpath']
+    fic_mask = data['mask']
+    h, w = fic_mask.shape
+    vis_scale = max(1, max(h, w) // VIS_MAX)
+    vh, vw = h // vis_scale, w // vis_scale
+    with rasterio.open(fpath) as src:
+        thumb = src.read([1, 2, 3, 4], out_shape=(4, vh, vw))
+    rgb_vis = thumb[:3].transpose(1, 2, 0)
+    valid_vis = thumb[3] == 255
+    rgb_vis = contrast_stretch(rgb_vis, valid_vis)
+    fic_vis = cv2.resize(fic_mask, (vw, vh), interpolation=cv2.INTER_NEAREST)
+    overlay = rgb_vis.copy()
+    overlay[fic_vis == 1] = (overlay[fic_vis == 1] * 0.4 + np.array([255, 255, 0]) * 0.6).astype(np.uint8)
+    axes[idx, 0].imshow(rgb_vis)
+    axes[idx, 0].set_title(f'{tag} — Original', fontsize=12)
+    axes[idx, 0].axis('off')
+    axes[idx, 1].imshow(overlay)
+    fic_pct = fic_mask.sum() / max(1, fic_mask.size) * 100
+    axes[idx, 1].set_title(f'{tag} — FIC Detection (yellow, {fic_pct:.2f}%)', fontsize=12)
+    axes[idx, 1].axis('off')
+
+plt.suptitle('FIC Detection — ATTANUR Images', fontsize=16, y=1.001)
+plt.tight_layout()
+fig.savefig(os.path.join(OUT_DIR, 'attanur_fic_maps.png'), dpi=120, bbox_inches='tight')
+plt.show()
+print(f'\nSaved: {os.path.join(OUT_DIR, "attanur_fic_maps.png")}')
+print('\nFIC training & inference complete!')
