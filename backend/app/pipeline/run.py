@@ -18,6 +18,7 @@ from app.pipeline.detection.blockage_detection import detect_blockages
 from app.pipeline.detection.canal_detection import detect_canals
 from app.pipeline.export.geojson import reaches_to_canonical_geojson, write_geojson
 from app.pipeline.export.geotiff import write_uint8_geotiff
+from app.pipeline.export.ortho_preview import write_ortho_preview
 from app.pipeline.export.thumbnails import write_reach_thumbnails
 from app.pipeline.geospatial.alignment import load_alignment
 from app.pipeline.models.canal_model import CanalModel
@@ -113,6 +114,8 @@ def run_prediction(
             settings.downscale_factor,
             out_dir / "images",
         )
+        progress(88, "Writing ortho preview")
+        preview_meta = write_ortho_preview(ortho_path, out_dir / "ortho_preview.jpg")
         collection = reaches_to_canonical_geojson(
             reaches,
             labels_s,
@@ -126,6 +129,7 @@ def run_prediction(
             model_version=model_version,
             pipeline_mode=pipeline_mode,
             label_source=label_source,
+            ortho_bounds=preview_meta["ortho_bounds"],
         )
         geojson_path = write_geojson(out_dir / "result.geojson", collection)
         summary = _summary(collection["features"])
@@ -137,6 +141,7 @@ def run_prediction(
             "model_version": model_version,
             "label_source": label_source,
             "summary": summary,
+            "ortho_bounds": preview_meta["ortho_bounds"],
         }
         metadata_path = out_dir / "metadata.json"
         metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
@@ -157,6 +162,7 @@ def run_prediction(
                 "geojson": geojson_path,
                 "thumbnails": str(out_dir / "images"),
                 "canal_mask": str(out_dir / "canal_mask.tif"),
+                "ortho_preview": str(out_dir / "ortho_preview.jpg"),
             },
         )
         (out_dir / "result.json").write_text(result.model_dump_json(), encoding="utf-8")

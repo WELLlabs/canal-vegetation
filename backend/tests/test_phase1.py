@@ -318,6 +318,8 @@ class TestSyntheticPipeline(unittest.TestCase):
             self.assertEqual(result.model_version, "fake.pth")
             gj = json.loads(Path(result.geojson_path).read_text(encoding="utf-8"))
             self.assertEqual(gj["metadata"]["label_source"], "model")
+            self.assertIn("ortho_bounds", gj["metadata"])
+            self.assertTrue(Path(result.outputs["ortho_preview"]).is_file())
             self.assertTrue(Path(result.geojson_path).is_file())
             for f in gj["features"]:
                 self.assertIn(f["properties"]["blockage_status"], {"clear", "partial", "moderate", "full"})
@@ -402,7 +404,50 @@ class TestSyntheticPipeline(unittest.TestCase):
             self.assertEqual(result.pipeline_mode, "ortho_plus_alignment")
             col = json.loads(Path(result.geojson_path).read_text(encoding="utf-8"))
             self.assertEqual(col["metadata"]["label_source"], "rule")
-            self.assertGreaterEqual(len(col["features"]), 1)
+            self.assertGreater(
+                len(col["features"]),
+                1,
+                "alignment corridor must emit one feature per ~50 m chainage",
+            )
+            self.assertIn("ortho_bounds", col["metadata"])
+            bounds = col["metadata"]["ortho_bounds"]
+            self.assertEqual(len(bounds), 2)
+            self.assertEqual(len(bounds[0]), 2)
+            self.assertEqual(len(bounds[1]), 2)
+            south, west = bounds[0]
+            north, east = bounds[1]
+            self.assertLess(south, north)
+            self.assertLess(west, east)
+            self.assertTrue(Path(result.outputs["ortho_preview"]).is_file())
+            for f in col["features"]:
+                props = f["properties"]
+                self.assertIn(props["blockage_status"], {"clear", "partial", "moderate", "full"})
+                self.assertTrue(props["thumbnail_relpath"].startswith("images/"))
+                self.assertTrue((Path(result.thumbnail_directory) / Path(props["thumbnail_relpath"]).name).is_file())
+                self.assertIsInstance(props["chainage_m"], (int, float))
+                self.assertTrue(f["geometry"]["type"] in ("Polygon", "MultiPolygon"))
+
+            # frontend_payload contract (outputs + metadata pass through)
+            from app.models.database_models import Job
+            from app.services.result_service import frontend_payload
+
+            job = Job(
+                id="job-test",
+                status="completed",
+                progress=100,
+                current_stage="completed",
+                orthophoto_path=str(tif),
+                project_id="p1",
+                prediction_id="predA",
+                result_path=str(Path(result.geojson_path).parent / "result.json"),
+                output_path=str(Path(result.geojson_path).parent),
+                pipeline_mode="ortho_plus_alignment",
+                model_version="fake.pth",
+            )
+            payload = frontend_payload(job)
+            self.assertTrue(payload["outputs"].get("ortho_preview"))
+            self.assertIn("ortho_bounds", payload["geojson"]["metadata"])
+            self.assertGreater(len(payload["features"]), 1)
 
 
 if __name__ == "__main__":

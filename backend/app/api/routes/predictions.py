@@ -161,3 +161,17 @@ def get_prediction_image(prediction_id: str, image_name: str):
     if not str(target).startswith(str(root)) or not target.is_file():
         raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Image not found"})
     return FileResponse(target)
+
+
+@router.get("/predictions/{prediction_id}/ortho")
+def get_prediction_ortho(prediction_id: str):
+    """Serve the downsampled RGB orthomosaic preview for the Leaflet overlay."""
+    job = get_job_by_prediction(prediction_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Prediction not found"})
+    settings = get_settings()
+    root = (Path(settings.project_root) / (job.project_id or "default") / "predictions" / prediction_id).resolve()
+    target = (root / "ortho_preview.jpg").resolve()
+    if not str(target).startswith(str(root)) or not target.is_file():
+        raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "Ortho preview not found"})
+    return FileResponse(target, media_type="image/jpeg")

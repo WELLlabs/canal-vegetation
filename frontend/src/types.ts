@@ -59,6 +59,8 @@ export interface JobResult {
       model_version?: string;
       pipeline_mode?: string;
       label_source?: string;
+      /** Leaflet LatLngBounds: [[south, west], [north, east]] EPSG:4326 */
+      ortho_bounds?: [[number, number], [number, number]];
     };
     features: ReachFeature[];
   };

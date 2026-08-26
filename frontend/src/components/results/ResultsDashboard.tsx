@@ -10,6 +10,7 @@ import { downloadReport } from "../../utils/generateReport";
 import ReachTable from "./ReachTable";
 import ReachMap from "./ReachMap";
 import { predictionImageUrl } from "../../api/pipeline";
+import ChainageLightbox from "./ChainageLightbox";
 
 interface ResultsDashboardProps {
   result: AnalysisResult;
@@ -20,9 +21,23 @@ interface ResultsDashboardProps {
 export default function ResultsDashboard({ result, imageUrl, fileName }: ResultsDashboardProps) {
   const job = result.job;
   const [selected, setSelected] = useState<ReachFeature | null>(null);
-  const onSelect = useCallback((feature: ReachFeature) => {
-    setSelected(feature);
-  }, []);
+  const features = useMemo(() => {
+    const list = job?.features?.length ? job.features : job?.geojson?.features || [];
+    return [...list].sort((a, b) => {
+      const ca = (a.properties.canal_name || "") + String(a.properties.chainage_m ?? a.properties.chainage ?? 0).padStart(9, "0");
+      const cb = (b.properties.canal_name || "") + String(b.properties.chainage_m ?? b.properties.chainage ?? 0).padStart(9, "0");
+      return ca.localeCompare(cb);
+    });
+  }, [job]);
+  const [lbIndex, setLbIndex] = useState<number | null>(null);
+  const openAt = useCallback(
+    (feature: ReachFeature) => {
+      setSelected(feature);
+      const i = features.findIndex((f) => String(f.properties.reach_id) === String(feature.properties.reach_id));
+      if (i >= 0) setLbIndex(i);
+    },
+    [features]
+  );
   const source = job?.label_source || job?.geojson?.metadata?.label_source || "model";
   const mode = job?.pipeline_mode || job?.geojson?.metadata?.pipeline_mode || "ortho_only";
   const modelVersion = job?.model_version || job?.geojson?.metadata?.model_version || "unknown";
@@ -70,7 +85,7 @@ export default function ResultsDashboard({ result, imageUrl, fileName }: Results
 
       {job && (
         <div className="mb-5">
-          <ReachMap job={job} selectedId={selected?.properties.reach_id} onSelect={onSelect} />
+          <ReachMap job={job} selectedId={selected?.properties.reach_id} onSelect={openAt} />
         </div>
       )}
 
@@ -141,7 +156,7 @@ export default function ResultsDashboard({ result, imageUrl, fileName }: Results
         </div>
       )}
 
-      {job && <ReachTable job={job} selectedId={selected?.properties.reach_id} onSelect={onSelect} />}
+      {job && <ReachTable job={job} selectedId={selected?.properties.reach_id} onSelect={openAt} />}
 
       <div className="mt-5">
         <RecommendationsList items={result.recommendations} />
@@ -160,6 +175,18 @@ export default function ResultsDashboard({ result, imageUrl, fileName }: Results
           Download Report
         </button>
       </div>
+      {lbIndex !== null && job && (
+        <ChainageLightbox
+          features={features}
+          index={lbIndex}
+          predId={predId}
+          onClose={() => setLbIndex(null)}
+          onNavigate={(i) => {
+            setLbIndex(i);
+            setSelected(features[i] ?? null);
+          }}
+        />
+      )}
     </div>
   );
 }

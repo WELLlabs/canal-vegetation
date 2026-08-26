@@ -111,16 +111,21 @@ def canonical_collection(
     model_version: str,
     pipeline_mode: str,
     label_source: str,
+    ortho_bounds: list | None = None,
 ) -> dict:
+    metadata: dict = {
+        "project_id": project_id,
+        "prediction_id": prediction_id,
+        "model_version": model_version,
+        "pipeline_mode": pipeline_mode,
+        "label_source": label_source,
+    }
+    if ortho_bounds is not None:
+        # Leaflet imageOverlay: [[south, west], [north, east]] in EPSG:4326
+        metadata["ortho_bounds"] = ortho_bounds
     return {
         "type": "FeatureCollection",
-        "metadata": {
-            "project_id": project_id,
-            "prediction_id": prediction_id,
-            "model_version": model_version,
-            "pipeline_mode": pipeline_mode,
-            "label_source": label_source,
-        },
+        "metadata": metadata,
         "features": features,
     }
 
@@ -139,6 +144,7 @@ def reaches_to_canonical_geojson(
     model_version: str,
     pipeline_mode: str,
     label_source: str,
+    ortho_bounds: list | None = None,
 ) -> dict:
     features = []
     for reach in reaches:
@@ -186,6 +192,7 @@ def reaches_to_canonical_geojson(
         model_version=model_version,
         pipeline_mode=pipeline_mode,
         label_source=label_source,
+        ortho_bounds=ortho_bounds,
     )
 
 

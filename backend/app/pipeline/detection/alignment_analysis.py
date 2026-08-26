@@ -76,6 +76,7 @@ def split_line_reaches(line: dict, reach_m: float) -> list[dict]:
     if total < 1e-3:
         return []
     starts = np.arange(0.0, total, reach_m) if total >= reach_m else np.array([0.0])
+    base_ch = float(line["chainage_m"]) if line.get("chainage_m") is not None else 0.0
     out = []
     for i, s0 in enumerate(starts):
         s1 = min(s0 + reach_m, total)
@@ -90,10 +91,10 @@ def split_line_reaches(line: dict, reach_m: float) -> list[dict]:
         rec = dict(line)
         rec["pts_xy"] = sub
         rec["reach_idx"] = i
-        rec["chainage_m"] = float(line["chainage_m"] if line.get("chainage_m") is not None else s0)
+        rec["chainage_m"] = float(base_ch + s0)
         rec["length_m"] = float(s1 - s0)
         out.append(rec)
-    return out or [dict(line, reach_idx=0, chainage_m=line.get("chainage_m") or 0.0, length_m=total)]
+    return out or [dict(line, reach_idx=0, chainage_m=base_ch, length_m=total)]
 
 
 def analyze_alignment_reaches(orthophoto_path: str, lines: list[dict], settings: Settings | None = None) -> list[dict]:
@@ -162,7 +163,7 @@ def analyze_alignment_reaches(orthophoto_path: str, lines: list[dict], settings:
 
     rock_t = max(0.04, float(np.percentile(rocks, 95))) if rocks else 0.08
     reaches = []
-    for i, sg in enumerate(segments):
+    for sg in segments:
         if sg.get("bbox_px") is None:
             # predict_segments.py skips orthos whose bounds do not contain the segment.
             continue
@@ -170,10 +171,11 @@ def analyze_alignment_reaches(orthophoto_path: str, lines: list[dict], settings:
         pct = int(round((veg or 0.0) * 100)) if veg is not None else 0
         status = classify_blockage_pct(pct) if veg is not None else "clear"
         rock = sg.get("rock") or 0.0
+        idx = len(reaches)
         reaches.append(
             {
-                "reach_idx": i,
-                "global_reach_idx": i,
+                "reach_idx": idx,
+                "global_reach_idx": idx,
                 "canal_name": sg.get("canal_name") or "canal",
                 "canal_type": sg.get("canal_type") or "distributary",
                 "chainage_m": float(sg.get("chainage_m") or 0.0),

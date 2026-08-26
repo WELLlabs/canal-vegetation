@@ -67,4 +67,9 @@ export function predictionImageUrl(predictionId: string, relpath: string): strin
   return apiUrl(`/api/v1/predictions/${predictionId}/images/${name}`);
 }
 
+
+export function orthoPreviewUrl(predictionId: string): string {
+  return apiUrl(`/api/v1/predictions/${predictionId}/ortho`);
+}
+
 export { API_BASE_URL };
