@@ -1,0 +1,31 @@
+services:
+  backend:
+    build: ./backend
+    environment:
+      - CANAL_DEVICE=cpu
+      - CANAL_MODEL_VERSION=v5
+    volumes:
+      - ./backend/app/config/models:/app/app/config/models:ro
+      - canal_storage:/app/app/storage
+    # No host port needed: the frontend reaches the backend over the internal
+    # Docker network as "backend:8000". (To debug the API directly from the Mac,
+    # add:  ports: ["8001:8000"]  and use http://localhost:8001 )
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  canal_storage:
