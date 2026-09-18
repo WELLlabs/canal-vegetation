@@ -41,10 +41,12 @@ def _enhance(rgb, valid=None):
 
 def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                  progress_cb=None, canal_key="", canal_label="",
-                 dsm_path=None, dtm_path=None):
+                 dsm_path=None, dtm_path=None, default_width=6.0,
+                 default_ctype=""):
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     img_dir = out_dir / "reaches"; img_dir.mkdir(parents=True, exist_ok=True)
-    reaches, src_crs = geo.load_reaches(Path(shp_path))
+    reaches, src_crs = geo.load_reaches(
+        Path(shp_path), default_width=default_width, default_ctype=default_ctype)
 
     results, counts = [], {"clear": 0, "partial": 0, "moderate": 0, "blocked": 0}
     covered = 0

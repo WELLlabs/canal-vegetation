@@ -49,6 +49,8 @@ def _worker(job_id: str, canal: str, ortho_path: Path, out_dir: Path,
             canal_label=alignments.CANALS[canal]["label"],
             dsm_path=str(dsm_path) if dsm_path else None,
             dtm_path=str(dtm_path) if dtm_path else None,
+            default_width=float(alignments.CANALS[canal].get("width", 6.0)),
+            default_ctype=alignments.CANALS[canal].get("ctype", ""),
         )
         _set(job_id, state="completed", progress=100, message="Completed",
              summary=summary, finished_at=_now())
