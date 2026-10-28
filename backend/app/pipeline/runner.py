@@ -42,11 +42,12 @@ def _enhance(rgb, valid=None):
 def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                  progress_cb=None, canal_key="", canal_label="",
                  dsm_path=None, dtm_path=None, default_width=6.0,
-                 default_ctype=""):
+                 default_ctype="", bbox=None):
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     img_dir = out_dir / "reaches"; img_dir.mkdir(parents=True, exist_ok=True)
-    reaches, src_crs = geo.load_reaches(
-        Path(shp_path), default_width=default_width, default_ctype=default_ctype)
+    reaches, src_crs = geo.load_reaches_any(
+        Path(shp_path), default_width=default_width, default_ctype=default_ctype,
+        bbox=bbox)
 
     results, counts = [], {"clear": 0, "partial": 0, "moderate": 0, "blocked": 0}
     covered = 0
@@ -221,19 +222,41 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                                       "has_image", "lon", "lat")}})
     geojson = {"type": "FeatureCollection", "features": feats}
 
+    # --- Honest detection guard: the model segments the OPEN water channel. On a
+    # dry / earthen / vegetation-choked canal it detects almost nothing, pushing
+    # every reach to "blocked" with low confidence. Flag that so the numbers are
+    # not mistaken for real blockage.
+    scored = [r for r in results if r.get("status") in counts]
+    model_warning = None
+    if scored:
+        mean_conf = sum((r.get("conf") or 0.0) for r in scored) / len(scored)
+        mean_open = sum((r.get("openpct") or 0) for r in scored) / len(scored)
+        blocked_frac = counts["blocked"] / len(scored)
+        if mean_conf < 0.15 and mean_open < 5 and blocked_frac > 0.8:
+            model_warning = (
+                "The model detected almost no open water channel along this canal "
+                f"(mean confidence {round(mean_conf, 3)}, mean open channel "
+                f"{round(mean_open, 1)}%). This usually means a dry, earthen or "
+                "vegetation-covered canal, which the current open-water model was "
+                "not trained on, so the blockage scores below are unreliable for "
+                "this canal and should not be used until the model is retrained on "
+                "this canal type."
+            )
+
     summary = {
         "canal": canal_key, "canal_label": canal_label,
         "total_reaches": len(results), "covered_reaches": covered,
         "distribution": counts,
         "overlap": covered > 0,
         "silt": silt_summary,
+        "model_warning": model_warning,
         "coverage_note": "Reaches outside this orthophoto are marked not_covered.",
     }
     if covered == 0:
         summary["message"] = (
-            f"This orthophoto does not overlap the {canal_label} alignment, so no "
-            "reaches could be scored. Check that the orthophoto belongs to this "
-            "canal and that you selected the right canal."
+            "No canal from the national layer falls under this orthophoto, so no "
+            "reaches could be scored. Check that the orthophoto is correctly "
+            "georeferenced, or upload a canal alignment for this area."
         )
     clean = [{k: v for k, v in rec.items() if not k.startswith("_")}
              for rec in results]

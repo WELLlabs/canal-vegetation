@@ -2,19 +2,17 @@ import { useEffect, useRef, useState } from 'react'
 import Header from './components/Header.jsx'
 import ModelBadge from './components/ModelBadge.jsx'
 import PipelineSteps from './components/PipelineSteps.jsx'
-import CanalPicker from './components/CanalPicker.jsx'
 import UploadDropzone from './components/UploadDropzone.jsx'
 import ResultSummary from './components/ResultSummary.jsx'
 import ResultsView from './components/ResultsView.jsx'
-import { getModel, getCanals, getJob, runPrediction } from './lib/api.js'
+import { getModel, getJob, runPrediction } from './lib/api.js'
 
 const RUNNING = new Set(['queued', 'loading_model', 'running'])
 const PHASES = ['Upload', 'Model', 'Reaches', 'Silt', 'Report']
 
 export default function App() {
   const [model, setModel] = useState(null)
-  const [canals, setCanals] = useState([])
-  const [canal, setCanal] = useState(null)
+  const [align, setAlign] = useState(null)
   const [ortho, setOrtho] = useState(null)
   const [dsm, setDsm] = useState(null)
   const [dtm, setDtm] = useState(null)
@@ -29,8 +27,6 @@ export default function App() {
     (async () => {
       try { setModel(await getModel()); setApiDown(false) }
       catch { setModel({ installed: false }); setApiDown(true) }
-      try { const d = await getCanals(); setCanals(d.canals || []) }
-      catch { setApiDown(true) }
     })()
     return () => clearTimeout(timer.current)
   }, [])
@@ -38,7 +34,7 @@ export default function App() {
   const siltReady = dsm && dtm
   const running = job && RUNNING.has(job.state)
   const busy = uploading || running
-  const canRun = canal && ortho && model?.installed && !busy
+  const canRun = ortho && model?.installed && !busy
   const completedOverlap = job?.state === 'completed' && job.summary?.overlap
   const completedNoOverlap = job?.state === 'completed' && !job.summary?.overlap
   const showInputs = !busy && !completedOverlap && !completedNoOverlap
@@ -53,7 +49,7 @@ export default function App() {
   const submit = async () => {
     setError(''); setJob(null); setUploadPct(0); setUploading(true)
     try {
-      const j = await runPrediction({ canal, orthophoto: ortho, dsm, dtm,
+      const j = await runPrediction({ alignment: align, orthophoto: ortho, dsm, dtm,
         onUploadProgress: (pct) => setUploadPct(pct) })
       setUploading(false); setJob(j); poll(j.id)
     } catch (e) { setUploading(false); setError(e.message) }
@@ -62,7 +58,7 @@ export default function App() {
   const reset = () => {
     clearTimeout(timer.current)
     setJob(null); setUploading(false); setUploadPct(0); setError('')
-    setOrtho(null); setDsm(null); setDtm(null)
+    setOrtho(null); setAlign(null); setDsm(null); setDtm(null)
   }
 
   // Which phase is active, for the processing stepper.
@@ -91,9 +87,10 @@ export default function App() {
             Find canal blockages from your drone imagery.
           </h1>
           <p className="mt-2 max-w-2xl text-slate-600">
-            Upload an orthophoto, pick the canal, and the approved model scores every
-            50-metre reach as clear, partial, moderate, or blocked. Add elevation files
-            to also estimate silt.
+            Upload a georeferenced orthophoto. The app finds the canal automatically
+            from the national canal layer and the approved model scores every 50-metre
+            reach as clear, partial, moderate, or blocked. Add elevation files to also
+            estimate silt.
           </p>
           <div className="mt-6"><PipelineSteps /></div>
         </div>
@@ -102,7 +99,7 @@ export default function App() {
       {apiDown && (
         <div className="mx-auto max-w-6xl px-5 pt-6">
           <div className="rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-sm px-4 py-3">
-            <span className="font-semibold">Backend not reachable.</span> The model badge and canal list come from the API at <code className="bg-amber-100 px-1 rounded">/api</code> (port 8000), which isn't responding. Start the backend (see README), or run <code className="bg-amber-100 px-1 rounded">docker compose up --build</code> and open <b>http://localhost:8080</b>.
+            <span className="font-semibold">Backend not reachable.</span> The model badge comes from the API at <code className="bg-amber-100 px-1 rounded">/api</code> (port 8000), which isn't responding. Start the backend (see README), or run <code className="bg-amber-100 px-1 rounded">docker compose up --build</code> and open <b>http://localhost:8080</b>.
           </div>
         </div>
       )}
@@ -112,17 +109,17 @@ export default function App() {
         <main className="mx-auto max-w-6xl px-5 py-8 grid lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
             <div className="rounded-2xl border border-slate-200 bg-white p-5">
-              <h2 className="font-semibold text-slate-900">1 · Choose canal</h2>
-              <p className="text-sm text-slate-500 mb-4">Verified alignments are bundled, no shapefile upload needed.</p>
-              {canals.length
-                ? <CanalPicker canals={canals} value={canal} onChange={setCanal} />
-                : <div className="text-sm text-slate-400">Loading canals…</div>}
-            </div>
-
-            <div className="rounded-2xl border border-slate-200 bg-white p-5">
-              <h2 className="font-semibold text-slate-900">2 · Upload imagery</h2>
-              <p className="text-sm text-slate-500 mb-4">GeoTIFF orthophoto is required. Elevation files are optional.</p>
+              <h2 className="font-semibold text-slate-900">1 · Upload imagery</h2>
+              <p className="text-sm text-slate-500 mb-4">Any GeoTIFF orthophoto works; the app reads its location from the file and finds the canal from the national layer. Elevation files are optional.</p>
               <UploadDropzone label="Drone orthophoto (GeoTIFF)" hint="Drag & drop or click to browse, .tif / .tiff" required file={ortho} onFile={setOrtho} />
+              <div className="mt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-semibold text-slate-700">Canal alignment</span>
+                  <span className="text-xs font-medium rounded-full px-2 py-0.5 bg-slate-100 text-slate-500">Optional · override</span>
+                </div>
+                <UploadDropzone label="Own canal alignment (zipped shapefile or GeoJSON)" hint="Optional. Leave empty to auto-select from the national layer" accept=".zip,.geojson,.json" file={align} onFile={setAlign} />
+                <p className="mt-2 text-[11px] text-slate-400">Leave this empty and the canal under your orthophoto is picked automatically. Upload one only to override the national layer for this run.</p>
+              </div>
               <div className="mt-4">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-sm font-semibold text-slate-700">Optional · silt analysis</span>
@@ -143,10 +140,10 @@ export default function App() {
           <div className="space-y-6">
             <ModelBadge model={model} />
             <div className="rounded-2xl border border-slate-200 bg-white p-5">
-              <h3 className="font-semibold text-slate-900">3 · Run analysis</h3>
+              <h3 className="font-semibold text-slate-900">2 · Run analysis</h3>
               <ul className="mt-3 space-y-2 text-sm">
-                <li className="flex items-center gap-2">{check(canal)} Canal selected</li>
                 <li className="flex items-center gap-2">{check(ortho)} Orthophoto added</li>
+                <li className="flex items-center gap-2">{dot(true)} Canal {align ? 'from your alignment' : 'auto-selected'}</li>
                 <li className="flex items-center gap-2">{check(model?.installed)} Approved model ready</li>
                 <li className="flex items-center gap-2">{dot(siltReady)} Silt files {siltReady ? 'added' : '(optional)'}</li>
               </ul>
@@ -232,6 +229,7 @@ export default function App() {
               New analysis
             </button>
           </div>
+          {job.summary?.model_warning && <ModelWarning text={job.summary.model_warning} />}
           <ResultsView jobId={job.id} summary={job.summary} />
         </section>
       )}
@@ -243,6 +241,13 @@ export default function App() {
   )
 }
 
+function ModelWarning({ text }) {
+  return (
+    <div className="mb-4 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-sm px-4 py-3">
+      <span className="font-semibold">Scores unreliable for this canal. </span>{text}
+    </div>
+  )
+}
 function check(ok) {
   return ok
     ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-emerald-500"><path d="M20 6 9 17l-5-5" /></svg>

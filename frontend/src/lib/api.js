@@ -17,11 +17,12 @@ export async function getBoxes(id) { return j(await fetch(`${BASE}/jobs/${id}/bo
 export const overviewUrl = (id) => `${BASE}/jobs/${id}/overview`
 export const reachImageUrl = (id, rid) => `${BASE}/jobs/${id}/reach/${rid}/image`
 
-export function runPrediction({ canal, orthophoto, dsm, dtm, onUploadProgress }) {
+export function runPrediction({ canal, alignment, orthophoto, dsm, dtm, onUploadProgress }) {
   return new Promise((resolve, reject) => {
     const form = new FormData()
-    form.append('canal', canal)
     form.append('orthophoto', orthophoto)
+    if (alignment) form.append('alignment', alignment)
+    if (canal) form.append('canal', canal)
     if (dsm) form.append('dsm', dsm)
     if (dtm) form.append('dtm', dtm)
     const xhr = new XMLHttpRequest()

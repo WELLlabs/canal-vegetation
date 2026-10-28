@@ -4,6 +4,10 @@ APP_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = APP_DIR.parent
 ASSETS_DIR = APP_DIR / "assets"
 ALIGN_DIR = ASSETS_DIR / "alignments"
+# Bundled pan-India canal network. The app auto-selects the canal(s) under the
+# uploaded orthophoto from this layer, so the user does not upload a shapefile.
+NATIONAL_CANALS_SHP = Path(
+    os.getenv("CANAL_NATIONAL_SHP", str(ASSETS_DIR / "national" / "Canal.shp")))
 MODELS_DIR = APP_DIR / "config" / "models"
 STORAGE_DIR = APP_DIR / "storage"
 UPLOADS_DIR = STORAGE_DIR / "uploads"
