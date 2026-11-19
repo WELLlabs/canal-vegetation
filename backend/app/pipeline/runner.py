@@ -15,6 +15,26 @@ from rasterio.windows import Window
 from . import geo, segmenter, blockage, silt
 
 
+def _line_conf(line_prob, pts, step=1.0):
+    """Mean line-model canal probability (0-1) sampled about every pixel along a reach polyline."""
+    arr, inv = line_prob
+    H, W = arr.shape
+    px = np.array([inv * p for p in pts], float)                 # (col, row), continuous
+    if len(px) < 2:
+        return None
+    seg = np.hypot(*np.diff(px, axis=0).T)
+    cum = np.r_[0, np.cumsum(seg)]
+    if cum[-1] <= 0:
+        return None
+    t = np.arange(0, cum[-1] + 1e-9, step)
+    cc = np.interp(t, cum, px[:, 0]).astype(int)
+    rr = np.interp(t, cum, px[:, 1]).astype(int)
+    ok = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
+    if not ok.any():
+        return None
+    return round(float(arr[rr[ok], cc[ok]].mean()) / 255, 3)
+
+
 def _pixel_coords(transform, pts):
     xs = [p[0] for p in pts]
     ys = [p[1] for p in pts]
@@ -24,7 +44,8 @@ def _pixel_coords(transform, pts):
 
 # Status colours as BGR (OpenCV) matching the frontend palette.
 _BGR = {"clear": (129, 185, 16), "partial": (11, 158, 245),
-        "moderate": (22, 115, 249), "blocked": (68, 68, 239)}
+        "moderate": (22, 115, 249), "blocked": (68, 68, 239),
+        "no_canal": (184, 163, 148)}
 
 
 def _enhance(rgb, valid=None):
@@ -42,8 +63,17 @@ def _enhance(rgb, valid=None):
 def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                  progress_cb=None, canal_key="", canal_label="",
                  dsm_path=None, dtm_path=None, default_width=6.0,
-                 default_ctype="", bbox=None):
+                 default_ctype="", bbox=None, line_prob_path=None, line_conf_min=0.3):
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    # Canal probability from the line model (written by the refinement step). A reach whose line
+    # runs where that model sees no canal (a road, a bund, a field edge, or a canal hidden under
+    # canopy) is marked "no_canal" for review instead of being scored as blocked.
+    line_prob = None
+    if line_prob_path:
+        from scipy import ndimage as _ndi
+        with rasterio.open(line_prob_path) as _lp:
+            line_prob = (_ndi.maximum_filter(_lp.read(1), 5), ~_lp.transform)
+    n_nocanal = 0
     img_dir = out_dir / "reaches"; img_dir.mkdir(parents=True, exist_ok=True)
     reaches, src_crs = geo.load_reaches_any(
         Path(shp_path), default_width=default_width, default_ctype=default_ctype,
@@ -76,7 +106,7 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
         total = len(reaches)
         for i, (r, pw) in enumerate(zip(reaches, pts_world)):
             if progress_cb and i % 10 == 0:
-                progress_cb(int(5 + 90 * i / max(1, total)),
+                progress_cb(int(15 + 80 * i / max(1, total)),
                             f"Reach {i+1}/{total}")
             cx = sum(p[0] for p in pw) / len(pw)
             cy = sum(p[1] for p in pw) / len(pw)
@@ -134,8 +164,15 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
             prob = segmenter.segment_window(model, rgb_chw, valid, device=device)
             m = blockage.reach_blockage(prob, corridor, rgb_hwc)
             rec.update(m)
+            if line_prob is not None and m["status"] in counts:
+                lc = _line_conf(line_prob, pw)
+                rec["line_conf"] = lc
+                if lc is not None and lc < line_conf_min:
+                    rec.update(status="no_canal", scored_status=m["status"], blockpct=None)
+                    n_nocanal += 1
             if m["status"] in counts:
-                counts[m["status"]] += 1; covered += 1
+                if rec["status"] in counts:
+                    counts[rec["status"]] += 1; covered += 1
                 # Save a small zoom image of the reach for the detail panel.
                 crop = rgb_hwc
                 ch, cw = crop.shape[:2]
@@ -185,6 +222,8 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
             px = rec.get("_px")
             if not px:
                 continue
+            if rec.get("status") == "no_canal":
+                continue
             x1, y1 = int(px[0] / vs), int(px[1] / vs)
             x2, y2 = int(px[2] / vs), int(px[3] / vs)
             col = _BGR.get(rec["status"], (150, 150, 150))
@@ -195,10 +234,14 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
             boxes.append({"id": rec["id"], "x": x1, "y": y1,
                           "w": max(3, x2 - x1), "h": max(3, y2 - y1),
                           "status": rec["status"], "blockpct": rec.get("blockpct"),
+                          "openpct": rec.get("openpct"), "vegpct": rec.get("vegpct"),
+                          "width": rec.get("width"), "canal": rec.get("canal"),
                           "chainage": rec.get("chainage"),
                           "lon": rec.get("lon"), "lat": rec.get("lat"),
                           "silt_class": rec.get("silt_class"),
+                          "silt_mean_m": rec.get("silt_mean_m"),
                           "silt_vol_m3": rec.get("silt_vol_m3"),
+                          "line_conf": rec.get("line_conf"),
                           "has_image": True})
         cv2.imwrite(str(out_dir / "overview.png"), canvas)
         (out_dir / "boxes.json").write_text(json.dumps(
@@ -219,7 +262,7 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                                      ("id", "status", "blockpct", "openpct",
                                       "vegpct", "chainage", "width", "canal",
                                       "silt_class", "silt_mean_m", "silt_vol_m3",
-                                      "has_image", "lon", "lat")}})
+                                      "has_image", "lon", "lat", "line_conf")}})
     geojson = {"type": "FeatureCollection", "features": feats}
 
     # --- Honest detection guard: the model segments the OPEN water channel. On a
@@ -250,11 +293,15 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
         "overlap": covered > 0,
         "silt": silt_summary,
         "model_warning": model_warning,
+        "no_canal_reaches": n_nocanal,
+        "no_canal_note": ("Reaches where the line model sees no canal along the line (a road, bund or "
+                          "field edge, or a canal hidden under trees) are marked no_canal and not "
+                          "scored. Check them in the reach images.") if n_nocanal else None,
         "coverage_note": "Reaches outside this orthophoto are marked not_covered.",
     }
     if covered == 0:
         summary["message"] = (
-            "No canal from the national layer falls under this orthophoto, so no "
+            f"No canal from {canal_label or 'the canal layer'} falls under this orthophoto, so no "
             "reaches could be scored. Check that the orthophoto is correctly "
             "georeferenced, or upload a canal alignment for this area."
         )

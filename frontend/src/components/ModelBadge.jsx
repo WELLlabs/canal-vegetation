@@ -28,6 +28,18 @@ export default function ModelBadge({ model, compact }) {
           <span className="text-slate-500">Type</span><span className="text-right font-medium capitalize">{model.kind}</span>
           <span className="text-slate-500">File</span><span className="text-right font-mono text-xs truncate">{model.name}</span>
           <span className="text-slate-500">Checksum</span><span className="text-right font-mono text-xs">{model.checksum}</span>
+          {/* <span className="text-slate-500">Canal alignment model</span>
+          <span className={`text-right font-medium ${model.alignment_refinement?.installed ? 'text-emerald-700' : 'text-amber-700'}`}>
+            {model.alignment_refinement?.installed ? 'Ready · refines the canal line' : 'Unavailable · uses supplied alignment'}
+          </span>
+          {(model.canal_layers?.regions || []).map(r => (
+            <span key={r.key} className="contents">
+              <span className="text-slate-500">{r.label} centreline</span>
+              <span className={`text-right font-medium ${r.installed ? 'text-emerald-700' : 'text-amber-700'}`}>
+                {r.installed ? `Ready · ${r.shapefile}` : 'Drop shapefile into assets/regions/' + r.key}
+              </span>
+            </span>
+          ))} */}
           <span className="text-slate-500 col-span-2 pt-1">Outputs</span>
           <div className="col-span-2 flex flex-wrap gap-1.5">
             {(model.classes||[]).map(c => <span key={c} className="text-xs rounded-md bg-brand-50 text-brand-800 px-2 py-0.5 capitalize">{c}</span>)}

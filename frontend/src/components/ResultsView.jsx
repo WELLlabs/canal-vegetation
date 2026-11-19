@@ -18,7 +18,7 @@ function Tile({ label, value, sub, accent }) {
   )
 }
 
-const LEGEND = [['Clear', '#10b981'], ['Partial', '#f59e0b'], ['Moderate', '#f97316'], ['Blocked', '#ef4444'], ['Not covered', '#cbd5e1']]
+const LEGEND = [['Clear', '#10b981'], ['Partial', '#f59e0b'], ['Moderate', '#f97316'], ['Blocked', '#ef4444'], ['No canal (check)', '#94a3b8'], ['Not covered', '#cbd5e1']]
 
 export default function ResultsView({ jobId, summary }) {
   const [tab, setTab] = useState('chain')

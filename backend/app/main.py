@@ -5,14 +5,14 @@ request. Job state and progress are polled from the frontend. Results (per-reach
 JSON, GeoJSON, summary) are written under storage/results/<job_id>/.
 """
 from __future__ import annotations
-import shutil, uuid, datetime, threading, traceback, json, io, csv
+import shutil, uuid, datetime, threading, traceback, json, io, csv, re, os
 from pathlib import Path
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, Response
 
-from . import config, model_registry, alignments
-from .pipeline import runner, geo
+from . import config, model_registry, alignments, regions
+from .pipeline import runner, geo, refine
 
 app = FastAPI(title="Canal Blockage App", version="0.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS + ["*"],
@@ -22,6 +22,24 @@ JOBS: dict[str, dict] = {}
 _LOCK = threading.Lock()
 
 
+def _job_file(job_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{12}", job_id):
+        raise HTTPException(404, "Job not found.")
+    return config.RESULTS_DIR / job_id / "job.json"
+
+
+def _job_dir(job_id: str) -> Path:
+    return _job_file(job_id).parent
+
+
+def _save_job(job_id: str):
+    path = _job_file(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(JOBS[job_id], default=str))
+    os.replace(tmp, path)
+
+
 def _now():
     return datetime.datetime.utcnow().isoformat() + "Z"
 
@@ -29,24 +47,70 @@ def _now():
 def _set(job_id, **kw):
     with _LOCK:
         JOBS[job_id].update(**kw)
+        _save_job(job_id)
 
 
 def _worker(job_id: str, align_path: Path, ortho_path: Path, out_dir: Path,
             canal_key="", canal_label="", default_width=6.0, default_ctype="",
-            national=False, dsm_path=None, dtm_path=None):
+            clip_layer=False, dsm_path=None, dtm_path=None):
     try:
         _set(job_id, state="loading_model", progress=2, message="Loading model")
         model = model_registry.load_segmenter(device=config.DEVICE)
 
-        # For the national layer, clip to the orthophoto footprint so only the
-        # local canal(s) are read and cut, not the whole country.
+        # For large layers (state or national), clip to the orthophoto footprint
+        # so only the local canal(s) are read and cut.
         bbox = None
-        if national:
-            _set(job_id, progress=4, message="Finding canal under the orthophoto")
-            nat_crs = geo.read_prj_crs(Path(align_path))
-            bbox = geo.footprint_bbox_in_crs(str(ortho_path), nat_crs, pad_m=300.0)
+        if clip_layer:
+            _set(job_id, progress=4, message=f"Finding canal under the orthophoto ({canal_label or 'canal layer'})")
+            layer_crs = geo.read_prj_crs(Path(align_path))
+            bbox = geo.footprint_bbox_in_crs(str(ortho_path), layer_crs, pad_m=300.0)
 
-        _set(job_id, state="running", progress=5, message="Segmenting reaches")
+        # Search a wide band around the alignment for the canal actually visible in the
+        # orthophoto and move the line onto it, so the narrow scoring strip sits on the canal.
+        refine_info = {"refined": False}
+        line_prob_path = None
+        if refine.available():
+            _set(job_id, state="running", progress=5,
+                 message="Searching for the canal around the alignment")
+            try:
+                new_path, line_prob_path, refine_info = refine.refine_alignment(
+                    str(ortho_path), align_path, clip_layer, out_dir,
+                    progress=lambda p, m: _set(job_id, progress=int(p), message=m))
+            except Exception as exc:          # never block scoring on this step
+                new_path, line_prob_path = None, None
+                refine_info = {"refined": False,
+                               "note": f"refinement failed, original alignment used: {exc}"}
+            if new_path is not None:
+                align_path, bbox = new_path, None
+            elif refine_info.get("no_visible_canal"):
+                # Do not fall back to the raw shapefile — that is what painted
+                # roads and village traces as blocked canals.
+                message = refine_info.get("note") or (
+                    "Mapped canal lines under this orthophoto are not visible in the imagery.")
+                summary = {
+                    "canal": canal_key, "canal_label": canal_label,
+                    "total_reaches": 0, "covered_reaches": 0,
+                    "distribution": {"clear": 0, "partial": 0, "moderate": 0, "blocked": 0},
+                    "overlap": False, "message": message,
+                    "alignment_refinement": refine_info,
+                }
+                out_dir = Path(out_dir)
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "summary.json").write_text(json.dumps(summary, indent=2))
+                (out_dir / "results.json").write_text("[]")
+                (out_dir / "reaches.geojson").write_text(
+                    json.dumps({"type": "FeatureCollection", "features": []}))
+                (out_dir / "boxes.json").write_text(
+                    json.dumps({"tile": canal_label, "width": 1, "height": 1, "boxes": []}))
+                _set(job_id, state="completed", progress=100, message="Completed",
+                     summary=summary, finished_at=_now())
+                return
+        else:
+            refine_info["note"] = ("refinement switched off (CANAL_REFINE=0)" if not config.REFINE_ENABLED
+                                   else f"line model {config.LINE_MODEL_FILE} not installed in "
+                                        "config/models; original alignment used")
+
+        _set(job_id, state="running", progress=15, message="Segmenting reaches")
 
         def cb(p, m):
             _set(job_id, progress=int(p), message=m)
@@ -60,7 +124,11 @@ def _worker(job_id: str, align_path: Path, ortho_path: Path, out_dir: Path,
             dtm_path=str(dtm_path) if dtm_path else None,
             default_width=float(default_width), default_ctype=default_ctype,
             bbox=bbox,
+            line_prob_path=str(line_prob_path) if line_prob_path else None,
+            line_conf_min=config.LINE_CONF_MIN,
         )
+        summary["alignment_refinement"] = refine_info
+        (Path(out_dir) / "summary.json").write_text(json.dumps(summary, indent=2))
         _set(job_id, state="completed", progress=100, message="Completed",
              summary=summary, finished_at=_now())
     except Exception as exc:
@@ -75,7 +143,16 @@ def health():
 
 @app.get("/api/model")
 def model():
-    return model_registry.model_info()
+    info = model_registry.model_info()
+    info["alignment_refinement"] = {
+        "installed": refine.available(),
+        "name": config.LINE_MODEL_FILE if refine.available() else None,
+    }
+    info["canal_layers"] = {
+        "regions": regions.list_regions(),
+        "national": Path(config.NATIONAL_CANALS_SHP).exists(),
+    }
+    return info
 
 
 @app.get("/api/canals")
@@ -94,11 +171,16 @@ async def predict(orthophoto: UploadFile = File(...),
                   dtm: UploadFile | None = File(None)):
     """Score canal blockage on any orthophoto.
 
-    By default the canal is auto-selected from the bundled national canal layer,
-    clipped to the orthophoto footprint, so the user uploads only the orthophoto.
+    By default the canal is auto-selected from a matching state centreline
+    (Karnataka first) or the bundled national layer, clipped to the orthophoto
+    footprint, so the user uploads only the orthophoto.
     An optional uploaded ``alignment`` (zipped shapefile or GeoJSON) overrides it;
     the bundled ``canal`` key is still accepted for backward compatibility.
     """
+    if not orthophoto.filename or Path(orthophoto.filename).suffix.lower() not in {".tif", ".tiff"}:
+        raise HTTPException(400, "Orthophoto must be a GeoTIFF (.tif or .tiff).")
+    if bool(dsm) != bool(dtm):
+        raise HTTPException(400, "Silt analysis needs both a DSM and a DTM.")
     if not model_registry.model_info().get("installed"):
         raise HTTPException(409, "No approved model is installed yet.")
 
@@ -116,16 +198,50 @@ async def predict(orthophoto: UploadFile = File(...),
         return dest
 
     ortho_path = _save(orthophoto, "orthophoto.tif")
+    try:
+        import rasterio
+        with rasterio.open(ortho_path) as raster:
+            if raster.crs is None:
+                raise HTTPException(400, "Orthophoto has no coordinate reference system (CRS).")
+            if raster.count < 3:
+                raise HTTPException(400, "Orthophoto must contain at least three RGB bands.")
+            if raster.width < 2 or raster.height < 2:
+                raise HTTPException(400, "Orthophoto contains no usable image area.")
+    except HTTPException:
+        shutil.rmtree(up_dir, ignore_errors=True)
+        raise
+    except Exception as exc:
+        shutil.rmtree(up_dir, ignore_errors=True)
+        raise HTTPException(400, f"Could not read the uploaded GeoTIFF: {exc}") from exc
+
+    for label, raster_file in (("DSM", dsm), ("DTM", dtm)):
+        if raster_file is None:
+            continue
+        if not raster_file.filename or Path(raster_file.filename).suffix.lower() not in {".tif", ".tiff"}:
+            shutil.rmtree(up_dir, ignore_errors=True)
+            raise HTTPException(400, f"{label} must be a GeoTIFF (.tif or .tiff).")
+        path = _save(raster_file, f"{label.lower()}.tif")
+        try:
+            import rasterio
+            with rasterio.open(path) as raster:
+                if raster.crs is None or raster.count < 1:
+                    raise HTTPException(400, f"{label} needs a CRS and at least one elevation band.")
+        except HTTPException:
+            shutil.rmtree(up_dir, ignore_errors=True)
+            raise
+        except Exception as exc:
+            shutil.rmtree(up_dir, ignore_errors=True)
+            raise HTTPException(400, f"Could not read the uploaded {label}: {exc}") from exc
 
     # Resolve the reach source. Priority: uploaded alignment > bundled canal key
-    # > national layer (default, auto-clipped to the orthophoto).
+    # > matching state centreline > national layer.
     canal_key = canal or ""
     canal_label = ""
     default_width, default_ctype = 6.0, ""
-    national = False
+    clip_layer = False
     if alignment is not None and alignment.filename:
         ext = Path(alignment.filename).suffix.lower()
-        if ext not in _ALIGN_EXTS:
+        if ext not in _ALIGN_EXTS - {".shp"}:
             raise HTTPException(
                 400, "Alignment must be a zipped shapefile (.zip) or a GeoJSON "
                      "(.geojson / .json).")
@@ -140,16 +256,27 @@ async def predict(orthophoto: UploadFile = File(...),
         default_ctype = c.get("ctype", "")
         source = "bundled"
     else:
-        if not Path(config.NATIONAL_CANALS_SHP).exists():
+        region = regions.pick_for_orthophoto(ortho_path)
+        if region:
+            align_path = region["path"]
+            canal_key = region["key"]
+            canal_label = region["label"]
+            default_width = region["width"]
+            default_ctype = region["ctype"]
+            clip_layer = True
+            source = "region"
+        elif Path(config.NATIONAL_CANALS_SHP).exists():
+            align_path = config.NATIONAL_CANALS_SHP
+            canal_label = "Auto-selected from the national canal layer"
+            clip_layer = True
+            source = "national"
+        else:
             raise HTTPException(
-                500, "National canal layer is not installed on the server.")
-        align_path = config.NATIONAL_CANALS_SHP
-        canal_label = "Auto-selected from the national canal layer"
-        national = True
-        source = "national"
+                500, "No canal layer is installed. Drop a Karnataka shapefile in "
+                     "backend/app/assets/regions/karnataka/ or install the national layer.")
 
-    dsm_path = _save(dsm, "dsm.tif") if dsm is not None else None
-    dtm_path = _save(dtm, "dtm.tif") if dtm is not None else None
+    dsm_path = up_dir / "dsm.tif" if dsm is not None else None
+    dtm_path = up_dir / "dtm.tif" if dtm is not None else None
     want_silt = bool(dsm_path and dtm_path)
 
     with _LOCK:
@@ -157,29 +284,45 @@ async def predict(orthophoto: UploadFile = File(...),
             "id": job_id, "canal": canal_key, "canal_label": canal_label,
             "source": source, "state": "queued", "progress": 0,
             "message": "Queued", "want_silt": want_silt,
-            "silt_note": ("Silt analysis arrives in Step 3." if want_silt else None),
+            "silt_note": (None if want_silt else "Upload both DSM and DTM to include silt analysis."),
             "created_at": _now(),
         }
+        _save_job(job_id)
     threading.Thread(
         target=_worker,
         args=(job_id, align_path, ortho_path, out_dir),
         kwargs=dict(canal_key=canal_key, canal_label=canal_label,
                     default_width=default_width, default_ctype=default_ctype,
-                    national=national, dsm_path=dsm_path, dtm_path=dtm_path),
+                    clip_layer=clip_layer, dsm_path=dsm_path, dtm_path=dtm_path),
         daemon=True).start()
     return JSONResponse(JOBS[job_id], status_code=202)
 
 
 @app.get("/api/jobs/{job_id}")
 def job(job_id: str):
+    record_path = _job_file(job_id)
     if job_id not in JOBS:
-        raise HTTPException(404, "Job not found.")
+        if not record_path.exists():
+            raise HTTPException(404, "Job not found.")
+        try:
+            record = json.loads(record_path.read_text())
+            if record.get("state") in {"queued", "loading_model", "running"}:
+                record.update(state="failed", error="The server restarted before this analysis finished.",
+                              finished_at=_now())
+                record_path.write_text(json.dumps(record))
+            elif record.get("state") == "completed":
+                summary_path = record_path.parent / "summary.json"
+                if summary_path.exists():
+                    record["summary"] = json.loads(summary_path.read_text())
+            JOBS[job_id] = record
+        except Exception as exc:
+            raise HTTPException(500, "Could not restore this job record.") from exc
     return JOBS[job_id]
 
 
 @app.get("/api/jobs/{job_id}/results")
 def results(job_id: str):
-    f = config.RESULTS_DIR / job_id / "results.json"
+    f = _job_dir(job_id) / "results.json"
     if not f.exists():
         raise HTTPException(404, "Results not ready.")
     return FileResponse(f, media_type="application/json")
@@ -187,7 +330,7 @@ def results(job_id: str):
 
 @app.get("/api/jobs/{job_id}/geojson")
 def geojson(job_id: str):
-    f = config.RESULTS_DIR / job_id / "reaches.geojson"
+    f = _job_dir(job_id) / "reaches.geojson"
     if not f.exists():
         raise HTTPException(404, "GeoJSON not ready.")
     return FileResponse(f, media_type="application/geo+json")
@@ -195,7 +338,7 @@ def geojson(job_id: str):
 
 @app.get("/api/jobs/{job_id}/csv")
 def csv_export(job_id: str):
-    f = config.RESULTS_DIR / job_id / "results.json"
+    f = _job_dir(job_id) / "results.json"
     if not f.exists():
         raise HTTPException(404, "Results not ready.")
     rows = json.loads(f.read_text())
@@ -214,7 +357,7 @@ def csv_export(job_id: str):
 
 @app.get("/api/jobs/{job_id}/reach/{rid}/image")
 def reach_image(job_id: str, rid: int):
-    f = config.RESULTS_DIR / job_id / "reaches" / f"{rid}.jpg"
+    f = _job_dir(job_id) / "reaches" / f"{rid}.jpg"
     if not f.exists():
         raise HTTPException(404, "No image for this reach.")
     return FileResponse(f, media_type="image/jpeg")
@@ -222,7 +365,7 @@ def reach_image(job_id: str, rid: int):
 
 @app.get("/api/jobs/{job_id}/overview")
 def overview(job_id: str):
-    f = config.RESULTS_DIR / job_id / "overview.png"
+    f = _job_dir(job_id) / "overview.png"
     if not f.exists():
         raise HTTPException(404, "No overview for this job.")
     return FileResponse(f, media_type="image/png")
@@ -230,7 +373,7 @@ def overview(job_id: str):
 
 @app.get("/api/jobs/{job_id}/boxes")
 def boxes(job_id: str):
-    f = config.RESULTS_DIR / job_id / "boxes.json"
+    f = _job_dir(job_id) / "boxes.json"
     if not f.exists():
         raise HTTPException(404, "No boxes for this job.")
     return FileResponse(f, media_type="application/json")

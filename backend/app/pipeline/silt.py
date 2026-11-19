@@ -12,8 +12,9 @@ from __future__ import annotations
 import numpy as np
 import cv2
 import rasterio
-from rasterio.windows import Window, from_bounds
+from rasterio.windows import Window, transform as window_transform
 from rasterio.enums import Resampling
+from rasterio.warp import reproject
 
 LOW = 0.5
 HIGH = 1.0
@@ -66,13 +67,18 @@ def reach_silt(dsm_src, dtm_src, pts_dsm, width: float) -> dict | None:
     win = Window(c0, r0, c1 - c0, r1 - r0)
     dsm = _nodata_to_nan(dsm_src.read(1, window=win), dsm_src)
 
-    # Read the DTM over the same world extent, resampled onto the DSM window grid.
-    wleft, wtop = tr * (c0, r0)
-    wright, wbottom = tr * (c1, r1)
-    dtm_win = from_bounds(wleft, wbottom, wright, wtop, dtm_src.transform)
-    dtm = _nodata_to_nan(
-        dtm_src.read(1, window=dtm_win, out_shape=dsm.shape,
-                     resampling=Resampling.bilinear), dtm_src)
+    # Reproject/resample DTM onto the exact DSM crop grid. DSM and DTM files
+    # commonly have different resolutions, extents, and sometimes CRSs.
+    dtm = np.full(dsm.shape, np.nan, dtype=np.float32)
+    reproject(
+        source=rasterio.band(dtm_src, 1), destination=dtm,
+        src_transform=dtm_src.transform, src_crs=dtm_src.crs,
+        src_nodata=dtm_src.nodata,
+        dst_transform=window_transform(win, tr), dst_crs=dsm_src.crs,
+        dst_nodata=np.nan, resampling=Resampling.bilinear,
+    )
+    dtm[~np.isfinite(dtm)] = np.nan
+    dtm[dtm < -1e5] = np.nan
 
     chm = np.where(np.isfinite(dsm) & np.isfinite(dtm), dsm - dtm, np.nan)
 

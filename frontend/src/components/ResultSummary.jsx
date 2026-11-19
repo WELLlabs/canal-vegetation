@@ -50,9 +50,7 @@ export default function ResultSummary({ summary }) {
           )
         })}
       </div>
-      <p className="mt-4 text-xs text-slate-400">
-        Reaches outside the uploaded orthophoto are marked not-covered.
-      </p>
+      <p className="mt-4 text-xs text-slate-400">Reaches outside the uploaded orthophoto are marked not-covered.</p>
     </div>
   )
 }

@@ -30,7 +30,8 @@ def _discover() -> Path | None:
         p = config.MODELS_DIR / config.FIXED_MODEL_FILENAME
         return p if p.exists() else None
     cands = sorted(p for p in config.MODELS_DIR.glob("*")
-                   if p.is_file() and p.suffix.lower() in _MODEL_EXTS)
+                   if p.is_file() and p.suffix.lower() in _MODEL_EXTS
+                   and p.name != config.LINE_MODEL_FILE)   # the line model is not the scorer
     return cands[0] if cands else None
 
 

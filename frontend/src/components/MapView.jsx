@@ -9,6 +9,7 @@ const COLOR = [
   'partial', '#f59e0b',
   'moderate', '#f97316',
   'blocked', '#ef4444',
+  'no_canal', '#94a3b8',
   '#cbd5e1', // not_covered / default
 ]
 const STYLE = {

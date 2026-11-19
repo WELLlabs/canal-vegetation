@@ -1,14 +1,48 @@
-import { reachImageUrl } from '../lib/api.js'
+import { useEffect, useState } from 'react'
+import { getGeojson, reachImageUrl } from '../lib/api.js'
 const PILL = {
   clear: 'bg-emerald-100 text-emerald-700', partial: 'bg-amber-100 text-amber-700',
   moderate: 'bg-orange-100 text-orange-700', blocked: 'bg-rose-100 text-rose-700',
+  no_canal: 'bg-slate-200 text-slate-700',
 }
+const LABEL = { no_canal: 'No canal (check)' }
 const inr = (n) => Number(n).toLocaleString('en-IN')
 function Row({ k, v }) {
   return (<div className="flex justify-between text-sm py-1.5 border-b border-slate-100 last:border-0">
     <span className="text-slate-500">{k}</span><span className="font-medium text-slate-800 tabular-nums">{v}</span></div>)
 }
+
+function featureFromReach(reach) {
+  const props = {
+    id: reach.id, status: reach.status, chainage_m: reach.chainage,
+    blockage_pct: reach.blockpct, openpct: reach.openpct, vegpct: reach.vegpct,
+    width: reach.width, canal: reach.canal, line_conf: reach.line_conf,
+    lat: reach.lat, lon: reach.lon,
+    silt_class: reach.silt_class, silt_mean_m: reach.silt_mean_m, silt_vol_m3: reach.silt_vol_m3,
+  }
+  return {
+    type: 'Feature',
+    geometry: reach.lon != null && reach.lat != null
+      ? { type: 'Point', coordinates: [reach.lon, reach.lat] }
+      : null,
+    properties: Object.fromEntries(Object.entries(props).filter(([, v]) => v != null)),
+  }
+}
+
 export default function ReachDetail({ jobId, reach }) {
+  const [feature, setFeature] = useState(null)
+
+  useEffect(() => {
+    if (!reach) { setFeature(null); return }
+    let cancelled = false
+    getGeojson(jobId).then(gj => {
+      if (cancelled) return
+      const f = (gj.features || []).find(x => String(x.properties?.id) === String(reach.id))
+      setFeature(f || featureFromReach(reach))
+    }).catch(() => { if (!cancelled) setFeature(featureFromReach(reach)) })
+    return () => { cancelled = true }
+  }, [jobId, reach])
+
   if (!reach) {
     return <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/60 p-6 text-sm text-slate-400 h-full grid place-items-center text-center">
       <div>
@@ -18,16 +52,12 @@ export default function ReachDetail({ jobId, reach }) {
     </div>
   }
   const s = reach.status
-  const record = {
-    id: reach.id, status: reach.status, chainage_m: reach.chainage,
-    blockage_pct: reach.blockpct, lat: reach.lat, lon: reach.lon,
-    silt_class: reach.silt_class, silt_vol_m3: reach.silt_vol_m3,
-  }
+  const geo = feature || featureFromReach(reach)
   return (
     <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
       <div className="flex items-center justify-between">
         <h3 className="font-semibold text-slate-900">Reach {reach.id}</h3>
-        <span className={`text-xs font-semibold rounded-full px-2.5 py-1 capitalize ${PILL[s]||'bg-slate-100 text-slate-600'}`}>{s}</span>
+        <span className={`text-xs font-semibold rounded-full px-2.5 py-1 capitalize ${PILL[s]||'bg-slate-100 text-slate-600'}`}>{LABEL[s] || s}</span>
       </div>
 
       {reach.has_image && (
@@ -59,8 +89,8 @@ export default function ReachDetail({ jobId, reach }) {
       </div>
 
       <details className="mt-3 group">
-        <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-slate-700">JSON record</summary>
-        <pre className="mt-2 rounded-lg bg-slate-900 text-slate-100 text-[11px] leading-relaxed p-3 overflow-x-auto">{JSON.stringify(record, null, 2)}</pre>
+        <summary className="cursor-pointer text-xs font-medium text-slate-500 hover:text-slate-700">GeoJSON</summary>
+        <pre className="mt-2 rounded-lg bg-slate-900 text-slate-100 text-[11px] leading-relaxed p-3 overflow-x-auto">{JSON.stringify(geo, null, 2)}</pre>
       </details>
     </div>
   )
