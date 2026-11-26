@@ -15,7 +15,8 @@ function Row({ k, v }) {
 function featureFromReach(reach) {
   const props = {
     id: reach.id, status: reach.status, chainage_m: reach.chainage,
-    blockage_pct: reach.blockpct, openpct: reach.openpct, vegpct: reach.vegpct,
+    blockage_pct: reach.blockpct, openpct: reach.openpct, vegpct: reach.vegpct, waterpct: reach.waterpct,
+    line_check: reach.line_check || undefined,
     width: reach.width, canal: reach.canal, line_conf: reach.line_conf,
     lat: reach.lat, lon: reach.lon,
     silt_class: reach.silt_class, silt_mean_m: reach.silt_mean_m, silt_vol_m3: reach.silt_vol_m3,
@@ -78,9 +79,11 @@ export default function ReachDetail({ jobId, reach }) {
       </div>
 
       <div className="mt-3">
-        {reach.blockpct != null && <Row k="Blockage" v={`${reach.blockpct}%`} />}
-        {reach.openpct != null && <Row k="Open channel" v={`${reach.openpct}%`} />}
-        {reach.vegpct != null && <Row k="Vegetation" v={`${reach.vegpct}%`} />}
+        {reach.blockpct != null && <Row k="Blockage (vegetation cover)" v={`${reach.blockpct} per cent`} />}
+        {reach.openpct != null && <Row k="Open channel" v={`${reach.openpct} per cent`} />}
+        {reach.waterpct != null && <Row k="Water" v={`${reach.waterpct} per cent`} />}
+        {reach.line_conf != null && <Row k="Canal signal (line model)" v={reach.line_conf} />}
+        {reach.line_check && <Row k="Check" v="Weak canal signal" />}
         {reach.chainage != null && <Row k="Chainage" v={`${reach.chainage} m`} />}
         {reach.width != null && <Row k="Width" v={`${reach.width} m`} />}
         {reach.silt_class && <Row k="Silt class" v={reach.silt_class} />}

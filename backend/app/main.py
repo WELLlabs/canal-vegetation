@@ -55,9 +55,13 @@ def _worker(job_id: str, align_path: Path, ortho_path: Path, out_dir: Path,
             clip_layer=False, dsm_path=None, dtm_path=None):
     try:
         _set(job_id, state="loading_model", progress=2, message="Loading model")
-        model = model_registry.load_segmenter(device=config.DEVICE)
+        model, classifier = None, None
+        if config.SCORING_METHOD == "open_water":
+            model = model_registry.load_segmenter(device=config.DEVICE)
+        else:
+            classifier, _clf_note = model_registry.load_blockage_classifier()
 
-        # For large layers (state or national), clip to the orthophoto footprint
+        # For large layers (the state layer), clip to the orthophoto footprint
         # so only the local canal(s) are read and cut.
         bbox = None
         if clip_layer:
@@ -126,6 +130,8 @@ def _worker(job_id: str, align_path: Path, ortho_path: Path, out_dir: Path,
             bbox=bbox,
             line_prob_path=str(line_prob_path) if line_prob_path else None,
             line_conf_min=config.LINE_CONF_MIN,
+            scoring=config.SCORING_METHOD, classifier=classifier,
+            veg_thresholds=config.VEG_THRESHOLDS,
         )
         summary["alignment_refinement"] = refine_info
         (Path(out_dir) / "summary.json").write_text(json.dumps(summary, indent=2))
@@ -150,7 +156,6 @@ def model():
     }
     info["canal_layers"] = {
         "regions": regions.list_regions(),
-        "national": Path(config.NATIONAL_CANALS_SHP).exists(),
     }
     return info
 
@@ -172,8 +177,7 @@ async def predict(orthophoto: UploadFile = File(...),
     """Score canal blockage on any orthophoto.
 
     By default the canal is auto-selected from a matching state centreline
-    (Karnataka first) or the bundled national layer, clipped to the orthophoto
-    footprint, so the user uploads only the orthophoto.
+    (Karnataka), clipped to the orthophoto footprint, so the user uploads only the orthophoto.
     An optional uploaded ``alignment`` (zipped shapefile or GeoJSON) overrides it;
     the bundled ``canal`` key is still accepted for backward compatibility.
     """
@@ -234,7 +238,7 @@ async def predict(orthophoto: UploadFile = File(...),
             raise HTTPException(400, f"Could not read the uploaded {label}: {exc}") from exc
 
     # Resolve the reach source. Priority: uploaded alignment > bundled canal key
-    # > matching state centreline > national layer.
+    # > matching state centreline (Karnataka).
     canal_key = canal or ""
     canal_label = ""
     default_width, default_ctype = 6.0, ""
@@ -265,15 +269,14 @@ async def predict(orthophoto: UploadFile = File(...),
             default_ctype = region["ctype"]
             clip_layer = True
             source = "region"
-        elif Path(config.NATIONAL_CANALS_SHP).exists():
-            align_path = config.NATIONAL_CANALS_SHP
-            canal_label = "Auto-selected from the national canal layer"
-            clip_layer = True
-            source = "national"
+        elif not regions.installed("karnataka"):
+            raise HTTPException(
+                500, "No canal layer is installed. Drop the Karnataka shapefile in "
+                     "backend/app/assets/regions/karnataka/.")
         else:
             raise HTTPException(
-                500, "No canal layer is installed. Drop a Karnataka shapefile in "
-                     "backend/app/assets/regions/karnataka/ or install the national layer.")
+                400, "This orthophoto is outside the Karnataka canal layer. Upload the "
+                     "canal alignment (zipped shapefile or GeoJSON) to score it.")
 
     dsm_path = up_dir / "dsm.tif" if dsm is not None else None
     dtm_path = up_dir / "dtm.tif" if dtm is not None else None
@@ -336,6 +339,16 @@ def geojson(job_id: str):
     return FileResponse(f, media_type="application/geo+json")
 
 
+@app.get("/api/jobs/{job_id}/lines")
+def canal_lines(job_id: str):
+    """Karnataka reference lines under the image, plus the traced lines the line model accepted
+    (scored) and rejected (not scored), as one WGS84 GeoJSON with a `role` property."""
+    f = _job_dir(job_id) / "refined" / "lines_map.geojson"
+    if not f.exists():
+        return {"type": "FeatureCollection", "features": []}
+    return FileResponse(f, media_type="application/geo+json")
+
+
 @app.get("/api/jobs/{job_id}/csv")
 def csv_export(job_id: str):
     f = _job_dir(job_id) / "results.json"
@@ -365,6 +378,11 @@ def reach_image(job_id: str, rid: int):
 
 @app.get("/api/jobs/{job_id}/overview")
 def overview(job_id: str):
+    # overview.jpg: clean, higher-resolution image for the zoomable chain view (boxes drawn in
+    # the browser). overview.png: older jobs, boxes burned in.
+    f = _job_dir(job_id) / "overview.jpg"
+    if f.exists():
+        return FileResponse(f, media_type="image/jpeg")
     f = _job_dir(job_id) / "overview.png"
     if not f.exists():
         raise HTTPException(404, "No overview for this job.")

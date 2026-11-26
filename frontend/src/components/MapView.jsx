@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import maplibregl from 'maplibre-gl'
 import 'maplibre-gl/dist/maplibre-gl.css'
-import { getGeojson } from '../lib/api.js'
+import { getGeojson, getLines } from '../lib/api.js'
 
 const COLOR = [
   'match', ['get', 'status'],
@@ -32,8 +32,28 @@ export default function MapView({ jobId, onSelect }) {
     map.current = m
 
     m.on('load', async () => {
-      let gj
+      let gj, lines
       try { gj = await getGeojson(jobId) } catch { return }
+      try { lines = await getLines(jobId) } catch { lines = { type: 'FeatureCollection', features: [] } }
+      // Karnataka reference lines (pink), traced lines the line model rejected (red dashed, not
+      // scored) and accepted (green, thin, under the scored reaches).
+      m.addSource('lines', { type: 'geojson', data: lines })
+      m.addLayer({ id: 'lines-reference', type: 'line', source: 'lines',
+        filter: ['==', ['get', 'role'], 'reference'],
+        paint: { 'line-color': '#ec4899', 'line-width': 1.5, 'line-opacity': 0.8 } })
+      m.addLayer({ id: 'lines-rejected', type: 'line', source: 'lines',
+        filter: ['==', ['get', 'role'], 'rejected'],
+        paint: { 'line-color': '#dc2626', 'line-width': 2, 'line-dasharray': [2, 2] } })
+      m.addLayer({ id: 'lines-accepted', type: 'line', source: 'lines',
+        filter: ['==', ['get', 'role'], 'accepted'],
+        paint: { 'line-color': '#22c55e', 'line-width': 1.5 } })
+      m.on('click', 'lines-rejected', (e) => {
+        const p = e.features[0].properties
+        new maplibregl.Popup().setLngLat(e.lngLat)
+          .setHTML(`<b>${p.name && p.name !== 'null' ? p.name : 'Traced line'}</b> · rejected, not scored<br/>` +
+                   `mean probability ${p.mean_prob} · coverage ${p.coverage}`)
+          .addTo(m)
+      })
       m.addSource('reaches', { type: 'geojson', data: gj, promoteId: 'id' })
       m.addLayer({ id: 'reaches-line', type: 'line', source: 'reaches',
         paint: { 'line-color': COLOR,
@@ -42,6 +62,7 @@ export default function MapView({ jobId, onSelect }) {
       // fit to data
       const b = new maplibregl.LngLatBounds()
       gj.features.forEach(f => f.geometry.coordinates.forEach(c => b.extend(c)))
+      if (b.isEmpty()) lines.features.forEach(f => f.geometry.coordinates.forEach(c => b.extend(c)))
       if (!b.isEmpty()) m.fitBounds(b, { padding: 40, maxZoom: 16 })
 
       let selId = null
@@ -52,8 +73,10 @@ export default function MapView({ jobId, onSelect }) {
         m.setFeatureState({ source: 'reaches', id: selId }, { sel: true })
         onSelect && onSelect(f.properties)
       })
-      m.on('mouseenter', 'reaches-line', () => m.getCanvas().style.cursor = 'pointer')
-      m.on('mouseleave', 'reaches-line', () => m.getCanvas().style.cursor = '')
+      for (const id of ['reaches-line', 'lines-rejected']) {
+        m.on('mouseenter', id, () => m.getCanvas().style.cursor = 'pointer')
+        m.on('mouseleave', id, () => m.getCanvas().style.cursor = '')
+      }
     })
     return () => { m.remove(); map.current = null }
   }, [jobId])

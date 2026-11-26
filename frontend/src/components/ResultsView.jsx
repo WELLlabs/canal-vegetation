@@ -18,7 +18,7 @@ function Tile({ label, value, sub, accent }) {
   )
 }
 
-const LEGEND = [['Clear', '#10b981'], ['Partial', '#f59e0b'], ['Moderate', '#f97316'], ['Blocked', '#ef4444'], ['No canal (check)', '#94a3b8'], ['Not covered', '#cbd5e1']]
+const LEGEND = [['Clear 0–5', '#10b981'], ['Partial 6–40', '#f59e0b'], ['Moderate 41–70', '#f97316'], ['Blocked 71–100 per cent', '#ef4444']]
 
 export default function ResultsView({ jobId, summary }) {
   const [tab, setTab] = useState('chain')
@@ -59,7 +59,14 @@ export default function ResultsView({ jobId, summary }) {
             ))}
           </div>
           <div className="hidden sm:flex flex-wrap items-center gap-3 text-xs">
+            <span className="text-slate-400">Vegetation cover:</span>
             {LEGEND.map(([l, c]) => (<span key={l} className="inline-flex items-center gap-1.5"><span className="h-2.5 w-3.5 rounded-full" style={{ background: c }} />{l}</span>))}
+            {tab === 'chain' && <span className="inline-flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed border-slate-400" />Check</span>}
+            {tab === 'map' && <>
+              <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-4" style={{ background: '#ec4899' }} />Karnataka reference</span>
+              <span className="inline-flex items-center gap-1.5"><span className="h-0.5 w-4" style={{ background: '#22c55e' }} />Accepted trace</span>
+              <span className="inline-flex items-center gap-1.5"><span className="w-4 border-t-2 border-dashed" style={{ borderColor: '#dc2626' }} />Rejected (not scored)</span>
+            </>}
           </div>
         </div>
         {tab === 'chain'

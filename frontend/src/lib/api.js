@@ -13,6 +13,7 @@ export async function getModel()  { return j(await fetch(`${BASE}/model`)) }
 export async function getCanals() { return j(await fetch(`${BASE}/canals`)) }
 export async function getJob(id)  { return j(await fetch(`${BASE}/jobs/${id}`)) }
 export async function getGeojson(id) { return j(await fetch(`${BASE}/jobs/${id}/geojson`)) }
+export async function getLines(id) { return j(await fetch(`${BASE}/jobs/${id}/lines`)) }
 export async function getBoxes(id) { return j(await fetch(`${BASE}/jobs/${id}/boxes`)) }
 export const overviewUrl = (id) => `${BASE}/jobs/${id}/overview`
 export const reachImageUrl = (id, rid) => `${BASE}/jobs/${id}/reach/${rid}/image`

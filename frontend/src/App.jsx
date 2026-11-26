@@ -101,9 +101,8 @@ export default function App() {
           </h1>
           <p className="mt-2 max-w-2xl text-slate-600">
             Upload a georeferenced orthophoto. The app finds the canal automatically
-            from the Karnataka centreline when the image is in Karnataka (otherwise the
-            national layer). The approved model scores every 50-metre reach as clear,
-            partial, moderate, or blocked. Add elevation files to also estimate silt.
+            from the Karnataka canal centreline. Every 50-metre reach is scored by the vegetation
+            cover in its canal strip as clear, partial, moderate, or blocked. Add elevation files to also estimate silt.
           </p>
           <div className="mt-6"><PipelineSteps /></div>
         </div>
@@ -130,8 +129,8 @@ export default function App() {
                   <span className="text-sm font-semibold text-slate-700">Canal alignment</span>
                   <span className="text-xs font-medium rounded-full px-2 py-0.5 bg-slate-100 text-slate-500">Optional · override</span>
                 </div>
-                <UploadDropzone label="Own canal alignment (zipped shapefile or GeoJSON)" hint="Optional. Leave empty to auto-select from the Karnataka or national layer" accept=".zip,.geojson,.json" file={align} onFile={setAlign} />
-                <p className="mt-2 text-[11px] text-slate-400">Leave this empty and the canal under your orthophoto is picked automatically (Karnataka centreline in-state, national layer elsewhere). Upload one only to override for this run.</p>
+                <UploadDropzone label="Own canal alignment (zipped shapefile or GeoJSON)" hint="Optional. Leave empty to auto-select from the Karnataka layer" accept=".zip,.geojson,.json" file={align} onFile={setAlign} />
+                <p className="mt-2 text-[11px] text-slate-400">Leave this empty and the canal under your orthophoto is picked automatically from the Karnataka centreline. Upload one to override it, or for an image outside Karnataka.</p>
               </div>
               <div className="mt-4">
                 <div className="flex items-center justify-between mb-2">
@@ -245,21 +244,6 @@ export default function App() {
               New analysis
             </button>
           </div>
-          {job.summary?.model_warning && <ModelWarning text={job.summary.model_warning} />}
-          {job.summary?.no_canal_note && <div className="mb-4 rounded-xl bg-slate-100 border border-slate-300 text-slate-700 text-sm px-4 py-3">
-            <span className="font-semibold">{job.summary.no_canal_reaches} reaches need review. </span>{job.summary.no_canal_note}
-          </div>}
-          {job.summary?.alignment_refinement?.note && <p className="mb-3 text-xs text-slate-500">
-            Canal alignment: {job.summary.alignment_refinement.note}
-          </p>}
-          {!!job.summary?.alignment_refinement?.dropped_lines?.length && (
-            <div className="mb-4 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-sm px-4 py-3">
-              <span className="font-semibold">
-                {job.summary.alignment_refinement.dropped_lines.length} mapped line(s) were not a visible canal and were not scored. </span>
-              The Karnataka layer includes laterals and minors that do not show as a canal in this orthophoto
-              ({job.summary.alignment_refinement.dropped_lines.map(d => d.name).filter(Boolean).slice(0, 6).join(', ')}).
-            </div>
-          )}
           <ResultsView jobId={job.id} summary={job.summary} />
         </section>
       )}
@@ -271,13 +255,6 @@ export default function App() {
   )
 }
 
-function ModelWarning({ text }) {
-  return (
-    <div className="mb-4 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-sm px-4 py-3">
-      <span className="font-semibold">Scores unreliable for this canal. </span>{text}
-    </div>
-  )
-}
 function check(ok) {
   return ok
     ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="text-emerald-500"><path d="M20 6 9 17l-5-5" /></svg>

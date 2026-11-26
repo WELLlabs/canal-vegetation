@@ -13,6 +13,6 @@ backend/app/assets/regions/karnataka/
 
 `Canal.shp` is used if several shapefiles are present; otherwise the first complete `.shp` set in this folder is used.
 
-Then restart is **not** required when Docker is running with the `regions` volume mount (`docker compose up`). The next analysis that falls inside Karnataka will use this layer as the canal centreline. Images outside Karnataka still use the national layer.
+Then restart is **not** required when Docker is running with the `regions` volume mount (`docker compose up`). The next analysis that falls inside Karnataka will use this layer as the canal centreline. Images outside Karnataka need an uploaded alignment.
 
 To add another state later: register it in `backend/app/regions.py` and create `backend/app/assets/regions/<state>/` the same way.

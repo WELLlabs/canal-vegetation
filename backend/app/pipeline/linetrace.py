@@ -59,6 +59,10 @@ DEFAULTS = dict(
     join_m=5, centre_m=15,
     # reaches / confidence
     reach_m=50, flag_prob=0.3,
+    # line acceptance (Karnataka notebook): a traced line is a supported canal only if its mean
+    # probability >= min_mean_prob AND >= min_coverage of its pixels reach pixel_prob_threshold.
+    # Both are measured on the unsmoothed trace, so smoothing cannot create evidence.
+    min_mean_prob=0.5, min_coverage=0.6, pixel_prob_threshold=0.5,
     # model / training
     encoder="efficientnet-b0", pretrained=True, tile=256, tiles_per_site=400, steps=1500, batch=16, lr=3e-4,
     scale_aug=0.2, color_aug=True, neg_m=4, neg_w=3, neg_share=0.3, val_frac=0.1, val_every=100, amp=True, cv_steps=None,
@@ -544,6 +548,14 @@ def path_prob(prob, path):
     return float(prob[a[:, 0], a[:, 1]].mean()) / 255
 
 
+def path_coverage(prob, path, thr):
+    """Share (0-1) of traced cells whose canal probability reaches thr (0-1)."""
+    a = np.asarray(path, int)
+    if not len(a):
+        return 0.0
+    return float((prob[a[:, 0], a[:, 1]] >= thr * 255).mean())
+
+
 def route(lp, prob, res_m, P, sigma_px):
     """Least-cost path along the (smoothed) probability, inside a corridor around the original line,
     with a soft pull towards the original line where the image gives no evidence.
@@ -710,21 +722,23 @@ def refine_lines(img, tr, crs, res, g, model, MD, P, scale, progress=None):
     for _, row in g.iterrows():
         lp = LineString([inv * (x, y) for x, y in row.geometry.coords])
         path, mp, corr = route(lp, prob, res, P, sig)
+        cov = path_coverage(prob, path, P["pixel_prob_threshold"])
         sm = smooth(path, P["smooth_m"] / res)
         line = LineString(sm[:, ::-1] + 0.5) if len(sm) >= 2 else lp       # (row, col) cell -> (x, y) centre
         line = recentre(line, prob, res, P["centre_m"], P["smooth_m"] / res)
-        origs.append(lp); traced.append(line); info.append((row, mp, corr))
+        origs.append(lp); traced.append(line); info.append((row, mp, cov, corr))
     traced = join_junctions(origs, traced, P["join_m"] / res, P["corridor_m"] / res)
 
     probq = ndi.maximum_filter(prob, 5)          # confidence: tolerate a 1-2 px offset from the ridge
     lines, rch = [], []
-    for k, (lp, line, (row, mp, corr)) in enumerate(zip(origs, traced, info)):
+    for k, (lp, line, (row, mp, cov, corr)) in enumerate(zip(origs, traced, info)):
         attrs = row.drop("geometry").to_dict()
         rs = reaches(line, probq, res, P["reach_m"])
         pts = shapely.line_interpolate_point(line, np.arange(0, line.length + 1e-9, max(5 / res, 1)))
         shift = float(np.mean(shapely.distance(pts, lp))) * res
         nchk = sum(c < P["flag_prob"] for _, _, c in rs)
-        lines.append({**attrs, "line_id": k, "mean_prob": round(mp, 3), "shift_m": round(shift, 1),
+        lines.append({**attrs, "line_id": k, "mean_prob": round(mp, 3), "coverage": round(cov, 3),
+                      "accepted": bool(mp >= P["min_mean_prob"] and cov >= P["min_coverage"]), "shift_m": round(shift, 1),
                       "corr_m": corr, "n_reach": len(rs), "n_check": nchk,
                       "geometry": px_to_crs(line.simplify(1.0), tr)})
         for ch, seg, conf in rs:
@@ -768,6 +782,10 @@ def predict(cfg, image, truth=None, name=None, model_path=None, out_dir=None):
             if f.suffix in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
                 z.write(f, f.name)
 
+    nacc = int(out["accepted"].sum())
+    print(f"[{name}] accepted {nacc} of {len(out)} traced lines (mean_prob >= {P['min_mean_prob']}, "
+          f"coverage >= {P['min_coverage']} at pixel probability {P['pixel_prob_threshold']}); "
+          "rejected lines stay in the output with accepted=0 and must not be used as canal reaches")
     nchk = int((out_r["status"] == "check").sum()) if len(out_r) else 0
     retried = int((out["corr_m"] > P["corridor_m"]).sum())
     print(f"[{name}] {len(out)} lines, {len(out_r)} reaches of {P['reach_m']} m, {nchk} flagged 'check' "

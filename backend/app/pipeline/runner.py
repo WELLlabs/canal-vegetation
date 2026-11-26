@@ -63,7 +63,8 @@ def _enhance(rgb, valid=None):
 def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                  progress_cb=None, canal_key="", canal_label="",
                  dsm_path=None, dtm_path=None, default_width=6.0,
-                 default_ctype="", bbox=None, line_prob_path=None, line_conf_min=0.3):
+                 default_ctype="", bbox=None, line_prob_path=None, line_conf_min=0.3,
+                 scoring="vegetation", classifier=None, veg_thresholds=blockage.VEG_THRESHOLDS):
     out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
     # Canal probability from the line model (written by the refinement step). A reach whose line
     # runs where that model sees no canal (a road, a bund, a field edge, or a canal hidden under
@@ -74,6 +75,8 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
         with rasterio.open(line_prob_path) as _lp:
             line_prob = (_ndi.maximum_filter(_lp.read(1), 5), ~_lp.transform)
     n_nocanal = 0
+    n_check = 0
+    open_water = scoring == "open_water"
     img_dir = out_dir / "reaches"; img_dir.mkdir(parents=True, exist_ok=True)
     reaches, src_crs = geo.load_reaches_any(
         Path(shp_path), default_width=default_width, default_ctype=default_ctype,
@@ -91,7 +94,7 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
         dst_crs = src.crs
 
         # Downscaled, contrast-stretched overview for the chain view.
-        vs = max(1, max(H, W) // 2400)
+        vs = max(1, math.ceil(max(H, W) / 4096))       # up to 4096 px, so the chain view can zoom
         vh, vw = H // vs, W // vs
         thumb = src.read(list(range(1, min(nbands, 4) + 1)),
                          out_shape=(min(nbands, 4), vh, vw))
@@ -99,6 +102,7 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
         canvas = cv2.cvtColor(
             _enhance(np.transpose(thumb[:3], (1, 2, 0)), tvalid),
             cv2.COLOR_RGB2BGR).copy()
+        clean_canvas = canvas.copy()
 
         # reproject alignment into the ortho CRS for pixel mapping
         pts_world = [geo.reproject_pts(r["pts"], src_crs, dst_crs) for r in reaches]
@@ -161,15 +165,24 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
             cv2.polylines(corridor, [loc], False, 255, max(2, 2 * half))
             corridor = ((corridor > 0) & valid).astype(np.uint8)
 
-            prob = segmenter.segment_window(model, rgb_chw, valid, device=device)
-            m = blockage.reach_blockage(prob, corridor, rgb_hwc)
+            if open_water:
+                prob = segmenter.segment_window(model, rgb_chw, valid, device=device)
+                m = blockage.reach_blockage(prob, corridor, rgb_hwc)
+            else:
+                m = blockage.reach_vegetation(rgb_hwc, corridor, loc, px_m, classifier, veg_thresholds)
             rec.update(m)
             if line_prob is not None and m["status"] in counts:
                 lc = _line_conf(line_prob, pw)
                 rec["line_conf"] = lc
                 if lc is not None and lc < line_conf_min:
-                    rec.update(status="no_canal", scored_status=m["status"], blockpct=None)
-                    n_nocanal += 1
+                    if open_water:
+                        rec.update(status="no_canal", scored_status=m["status"], blockpct=None)
+                        n_nocanal += 1
+                    else:
+                        # Weak canal signal from the line model (often a canal under canopy, which is
+                        # exactly a blockage). Keep the score so the chain stays complete; flag it.
+                        rec["line_check"] = True
+                        n_check += 1
             if m["status"] in counts:
                 if rec["status"] in counts:
                     counts[rec["status"]] += 1; covered += 1
@@ -222,8 +235,6 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
             px = rec.get("_px")
             if not px:
                 continue
-            if rec.get("status") == "no_canal":
-                continue
             x1, y1 = int(px[0] / vs), int(px[1] / vs)
             x2, y2 = int(px[2] / vs), int(px[3] / vs)
             col = _BGR.get(rec["status"], (150, 150, 150))
@@ -242,8 +253,11 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                           "silt_mean_m": rec.get("silt_mean_m"),
                           "silt_vol_m3": rec.get("silt_vol_m3"),
                           "line_conf": rec.get("line_conf"),
+                          "line_check": bool(rec.get("line_check")),
+                          "waterpct": rec.get("waterpct"),
                           "has_image": True})
         cv2.imwrite(str(out_dir / "overview.png"), canvas)
+        cv2.imwrite(str(out_dir / "overview.jpg"), clean_canvas, [cv2.IMWRITE_JPEG_QUALITY, 85])
         (out_dir / "boxes.json").write_text(json.dumps(
             {"tile": canal_label, "width": vw, "height": vh, "boxes": boxes}))
 
@@ -262,7 +276,8 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                                      ("id", "status", "blockpct", "openpct",
                                       "vegpct", "chainage", "width", "canal",
                                       "silt_class", "silt_mean_m", "silt_vol_m3",
-                                      "has_image", "lon", "lat", "line_conf")}})
+                                      "has_image", "lon", "lat", "line_conf",
+                                      "waterpct", "line_check")}})
     geojson = {"type": "FeatureCollection", "features": feats}
 
     # --- Honest detection guard: the model segments the OPEN water channel. On a
@@ -271,7 +286,7 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
     # not mistaken for real blockage.
     scored = [r for r in results if r.get("status") in counts]
     model_warning = None
-    if scored:
+    if scored and open_water:
         mean_conf = sum((r.get("conf") or 0.0) for r in scored) / len(scored)
         mean_open = sum((r.get("openpct") or 0) for r in scored) / len(scored)
         blocked_frac = counts["blocked"] / len(scored)
@@ -298,6 +313,10 @@ def run_blockage(ortho_path, shp_path, model, out_dir, device="cpu",
                           "field edge, or a canal hidden under trees) are marked no_canal and not "
                           "scored. Check them in the reach images.") if n_nocanal else None,
         "coverage_note": "Reaches outside this orthophoto are marked not_covered.",
+        "scoring": ({"method": "open_water"} if open_water else
+                    {"method": "classifier" if classifier is not None else "vegetation_cover",
+                     "thresholds": list(veg_thresholds)}),
+        "line_check_reaches": n_check,
     }
     if covered == 0:
         summary["message"] = (

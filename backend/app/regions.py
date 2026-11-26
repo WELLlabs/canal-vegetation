@@ -2,7 +2,8 @@
 
 Add a state to REGIONS, then drop its shapefile set into
 ``assets/regions/<folder>/``. When an orthophoto lands inside that layer's
-extent, the app uses it as the canal centreline instead of the all-India layer.
+extent, the app uses it as the canal centreline. Outside every installed region
+the user must upload an alignment.
 
 Karnataka is first. Later states follow the same pattern.
 """

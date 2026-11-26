@@ -66,9 +66,10 @@ def refine_alignment(ortho_path, align_path, bbox_clip: bool, out_dir, progress=
     del img
     n_in = int(len(out))
     all_lines, all_reaches = out, out_r
-    out, out_r, dropped = _keep_visible_canals(out, out_r, config.LINE_CONF_MIN)
+    out, out_r, dropped = _keep_visible_canals(out, out_r, P)
     out_dir = Path(out_dir) / "refined"
     out_dir.mkdir(parents=True, exist_ok=True)
+    _write_map_lines(g, all_lines, out, out_dir / "lines_map.geojson")
     import rasterio
     prob_path = out_dir / "line_prob.tif"
     with rasterio.open(prob_path, "w", driver="GTiff", height=prob.shape[0], width=prob.shape[1], count=1,
@@ -81,16 +82,18 @@ def refine_alignment(ortho_path, align_path, bbox_clip: bool, out_dir, progress=
     dropped_names = [d["name"] for d in dropped[:8]]
     extra = f"; skipped {len(dropped)} mapped line(s) with no visible canal" + (
         f" ({', '.join(dropped_names)})" if dropped_names else "")
+    thresholds = {k: P[k] for k in ("min_mean_prob", "min_coverage", "pixel_prob_threshold")}
     if not len(out):
         return None, prob_path, {
             "refined": True, "no_visible_canal": True, "search_m": P["buffer_m"],
-            "lines": 0, "lines_in": n_in, "dropped_lines": dropped,
+            "lines": 0, "lines_in": n_in, "dropped_lines": dropped, "thresholds": thresholds,
             "seconds": round(time.time() - t0),
             "note": (f"none of the {n_in} mapped line(s) under this orthophoto look like a canal "
                      f"in the imagery{extra}."),
         }
     shp = out_dir / "alignment.shp"
-    keep = [c for c in out.columns if c not in ("line_id", "mean_prob", "corr_m", "n_reach", "n_check")]
+    keep = [c for c in out.columns
+            if c not in ("line_id", "mean_prob", "coverage", "accepted", "corr_m", "n_reach", "n_check")]
     out[keep].to_file(shp)
     info = {
         "refined": True,
@@ -98,6 +101,7 @@ def refine_alignment(ortho_path, align_path, bbox_clip: bool, out_dir, progress=
         "lines": int(len(out)),
         "lines_in": n_in,
         "dropped_lines": dropped,
+        "thresholds": thresholds,
         "mean_shift_m": round(float(out["shift_m"].mean()), 1),
         "max_shift_m": round(float(out["shift_m"].max()), 1),
         "low_confidence_reaches": int((out_r["status"] == "check").sum()) if len(out_r) else 0,
@@ -108,29 +112,41 @@ def refine_alignment(ortho_path, align_path, bbox_clip: bool, out_dir, progress=
     return shp, prob_path, info
 
 
-def _keep_visible_canals(out, out_r, min_prob):
-    """Drop whole shapefile lines that are not a visible canal in the imagery.
+def _keep_visible_canals(out, out_r, P):
+    """Drop whole shapefile lines that are not a supported canal in the imagery.
 
-    Karnataka (and similar) layers include laterals, minors and village traces.
-    Per-reach scoring can still mark a road as blocked if the tracer snaps onto
-    it. The line model's mean probability on the mapped line is the better
-    signal: if the whole line is not a canal, none of its reaches are scored.
+    The Karnataka layer includes laterals, minors and village traces. Per-reach scoring can
+    still mark a road as blocked if the tracer snaps onto it, so a line is scored only if the
+    line model supports it along its trace (same rule as the Karnataka notebook): mean
+    probability >= min_mean_prob AND coverage (share of traced pixels >= pixel_prob_threshold)
+    >= min_coverage. Lines whose reaches are all flagged 'check' are dropped as well.
+    Rejected lines are reported (and drawn on the map) but never become scored reaches.
     """
     if out is None or not len(out):
         return out, out_r, []
-    keep = out["mean_prob"].fillna(0) >= float(min_prob)
+    mp = out["mean_prob"].fillna(0)
+    cov = out["coverage"].fillna(0) if "coverage" in out.columns else mp * 0 + 1
+    low_prob = mp < float(P["min_mean_prob"])
+    low_cov = cov < float(P["min_coverage"])
+    all_chk = out["line_id"] < -1                          # all False
     if out_r is not None and len(out_r) and "line_id" in out_r.columns:
         n_tot = out_r.groupby("line_id").size()
         n_chk = out_r.loc[out_r["status"] == "check"].groupby("line_id").size()
         frac_chk = n_chk.reindex(n_tot.index).fillna(0) / n_tot.replace(0, 1)
-        keep = keep & ~out["line_id"].isin(frac_chk[frac_chk >= 0.99].index)
-    dropped_g = out.loc[~keep]
+        all_chk = out["line_id"].isin(frac_chk[frac_chk >= 0.99].index)
+    keep = ~(low_prob | low_cov | all_chk)
+    out = out.copy()
+    out["accepted"] = keep
     dropped = []
-    for _, row in dropped_g.iterrows():
+    for i, row in out.loc[~keep].iterrows():
+        why = [w for w, f in (("low mean probability", low_prob[i]), ("low coverage", low_cov[i]),
+                              ("no confident reach", all_chk[i])) if f]
         ctype = row.get("can_type")
         dropped.append({
             "name": str(row.get("canname") or row.get("name") or f"line {row.get('line_id')}"),
             "mean_prob": round(float(row.get("mean_prob") or 0), 3),
+            "coverage": round(float(row.get("coverage") or 0), 3),
+            "reason": ", ".join(why),
             "can_type": None if ctype is None else str(ctype),
         })
     kept = out.loc[keep].copy()
@@ -141,3 +157,37 @@ def _keep_visible_canals(out, out_r, min_prob):
     else:
         kept_r = out_r.loc[out_r["line_id"].isin(set(kept["line_id"]))].copy()
     return kept, kept_r, dropped
+
+
+def _write_map_lines(ref, traced_all, kept, path):
+    """One WGS84 GeoJSON for the results map: the Karnataka reference lines under the image
+    (role=reference), accepted traced lines (role=accepted) and rejected ones (role=rejected)."""
+    import json
+    import geopandas as gpd
+    import pandas as pd
+    parts = []
+    if ref is not None and len(ref):
+        r = gpd.GeoDataFrame(geometry=ref.geometry.values, crs=ref.crs)
+        r["role"] = "reference"
+        parts.append(r)
+    if traced_all is not None and len(traced_all):
+        ok = set(kept["line_id"]) if kept is not None and len(kept) else set()
+        t = traced_all.copy()
+        col = "canname" if "canname" in t.columns else ("name" if "name" in t.columns else None)
+        names = [None if v is None or pd.isna(v) else str(v) for v in (t[col] if col else [None] * len(t))]
+        t = gpd.GeoDataFrame({
+            "role": ["accepted" if k in ok else "rejected" for k in t["line_id"]],
+            "name": names,
+            "mean_prob": t["mean_prob"].astype(float).round(3),
+            "coverage": t["coverage"].astype(float).round(3) if "coverage" in t.columns else None,
+            "shift_m": t["shift_m"].astype(float).round(1),
+        }, geometry=t.geometry.values, crs=t.crs)
+        parts.append(t)
+    if not parts:
+        gj = {"type": "FeatureCollection", "features": []}
+        Path(path).write_text(json.dumps(gj))
+        return
+    allg = pd.concat([p.to_crs("EPSG:4326") for p in parts], ignore_index=True)
+    allg = gpd.GeoDataFrame(allg, geometry="geometry", crs="EPSG:4326").explode(index_parts=False)
+    allg = allg[allg.geom_type == "LineString"]
+    Path(path).write_text(allg.to_json(drop_id=True))

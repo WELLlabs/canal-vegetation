@@ -21,6 +21,7 @@ SEG_ENCODER = "resnet50"
 SEG_IN_CHANNELS = 3
 SEG_CLASSES = 1
 BLOCKAGE_CLASSES = ["clear", "partial", "moderate", "blocked"]
+BLOCKAGE_CLASSIFIER_CLASSES = BLOCKAGE_CLASSES
 
 _cache = {"loaded": False, "model": None}
 
@@ -31,7 +32,7 @@ def _discover() -> Path | None:
         return p if p.exists() else None
     cands = sorted(p for p in config.MODELS_DIR.glob("*")
                    if p.is_file() and p.suffix.lower() in _MODEL_EXTS
-                   and p.name != config.LINE_MODEL_FILE)   # the line model is not the scorer
+                   and p.name not in (config.LINE_MODEL_FILE, config.BLOCKAGE_CLASSIFIER_FILE))
     return cands[0] if cands else None
 
 
@@ -42,7 +43,43 @@ def _sha1(p: Path, limit: int = 8_000_000) -> str:
     return h.hexdigest()[:12]
 
 
+def load_blockage_classifier():
+    """Core-repo classifier bundle, or (None, reason). Checked against the feature contract."""
+    p = config.MODELS_DIR / config.BLOCKAGE_CLASSIFIER_FILE
+    if not p.exists():
+        return None, None
+    from .pipeline.blockage import FEATURE_NAMES
+    try:
+        import joblib
+        b = joblib.load(p)
+    except Exception as exc:
+        return None, f"{p.name} could not be loaded ({exc}); vegetation thresholds used"
+    if not isinstance(b, dict) or "model" not in b:
+        return None, f"{p.name} is not a training.py bundle; vegetation thresholds used"
+    got = list(b.get("features") or [])
+    if got and got != FEATURE_NAMES:
+        return None, f"{p.name} expects different features; vegetation thresholds used"
+    return b, None
+
+
+def scoring_info() -> dict:
+    if config.SCORING_METHOD == "open_water":
+        return {"method": "open_water", "label": "Open-water share (v5 U-Net)"}
+    clf = (config.MODELS_DIR / config.BLOCKAGE_CLASSIFIER_FILE).exists()
+    return {"method": "classifier" if clf else "vegetation_cover",
+            "label": ("Trained vegetation classifier" if clf else "Vegetation cover of the canal strip"),
+            "thresholds": list(config.VEG_THRESHOLDS)}
+
+
 def model_info() -> dict:
+    if config.SCORING_METHOD != "open_water":
+        info = {"installed": True, "task": "canal_blockage", "version": "vegetation v1",
+                "kind": "vegetation", "classes": BLOCKAGE_CLASSIFIER_CLASSES, "locked": True,
+                "scoring": scoring_info()}
+        p = config.MODELS_DIR / config.BLOCKAGE_CLASSIFIER_FILE
+        info["name"] = p.name if p.exists() else "vegetation cover (5/40/70)"
+        info["checksum"] = _sha1(p) if p.exists() else "-"
+        return info
     p = _discover()
     if p is None:
         return {"installed": False, "task": "canal_blockage",
